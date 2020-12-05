@@ -42,12 +42,16 @@
 
 #include "cpu/o3/cpu.hh"
 
+#include <map>
+
 #include "arch/generic/traits.hh"
 #include "arch/kernel_stats.hh"
 #include "config/the_isa.hh"
 #include "cpu/activity.hh"
 #include "cpu/checker/cpu.hh"
 #include "cpu/checker/thread_context.hh"
+#include "cpu/colors.hh"
+#include "cpu/global_utils.hh"
 #include "cpu/o3/isa_specific.hh"
 #include "cpu/o3/thread_context.hh"
 #include "cpu/quiesce_event.hh"
@@ -64,19 +68,117 @@
 #include "sim/stat_control.hh"
 #include "sim/system.hh"
 
+std::vector<std::shared_ptr<utils::CounterCache>> bridge::CounterCaches;
+
 struct BaseCPUParams;
 
 using namespace TheISA;
 using namespace std;
+using bridge::GCONFIG;
 
-BaseO3CPU::BaseO3CPU(BaseCPUParams *params)
-    : BaseCPU(params)
-{
+BaseO3CPU::BaseO3CPU(BaseCPUParams *oparams)
+    : BaseCPU(oparams) {
+    // set all the extra options to a global config object for easy access
+    auto *params = dynamic_cast<DerivO3CPUParams *>(oparams);
+    if (params) {
+        GCONFIG.isSpectre = params->isSpectre;
+        GCONFIG.isFuturistic = params->isFuturistic;
+        GCONFIG.maxInsts = params->maxInsts;
+        GCONFIG.threatModel = params->threatModel;
+        GCONFIG.HWName = params->HWName;
+        GCONFIG.replayDetScheme = params->replayDetScheme;
+        GCONFIG.sbHWStruct = params->sbHWStruct;
+        GCONFIG.maxReplays = params->maxReplays;
+        GCONFIG.maxSBSize = params->maxSBSize;
+        GCONFIG.replayDetThreat = params->replayDetThreat;
+        GCONFIG.CCEnable = params->CCEnable;
+        GCONFIG.CCAssoc = params->CCAssoc;
+        GCONFIG.CCSets = params->CCSets;
+        GCONFIG.CCMissLatency = params->CCMissLatency;
+        GCONFIG.CCIdeal = params->CCIdeal;
+        GCONFIG.liftOnClear = params->liftOnClear;
+        GCONFIG.projectedElemCnt = params->projectedElemCnt;
+        GCONFIG.epochInfoPath = params->epochInfoPath;
+        GCONFIG.deleteOnRetire = params->deleteOnRetire;
+        GCONFIG.activeRecords = params->activeRecords;
+        GCONFIG.checkAllRecords = params->checkAllRecords;
+        GCONFIG.counterSize = params->counterSize;
+
+        map<std::string, utils::HWType> availableHW = {
+            {"Unsafe", utils::UNSAFE},
+            {"Fence", utils::FENCE},
+            {"Fence-All", utils::FENCE_ALL}};
+        GCONFIG.hw = availableHW.at(GCONFIG.HWName);
+
+        map<std::string, utils::replayDetection> availableReplayGran = {
+            {"NoDetect", utils::NO_DETECT},
+            {"Counter", utils::COUNTER},
+            {"Buffer", utils::BUFFER},
+            {"Epoch", utils::EPOCH}};
+        GCONFIG.replayDet = availableReplayGran.at(GCONFIG.replayDetScheme);
+
+        map<std::string, utils::sbStruct> availableSbHwStructs = {
+            {"Ideal", utils::IDEAL},
+            {"Bloom", utils::BLOOM},
+            {"CountingBloom", utils::COUNTING_BLOOM}};
+        GCONFIG.sbHW = availableSbHwStructs.at(GCONFIG.sbHWStruct);
+
+        map<std::string, utils::replayDetectionThreat> availableDetThreat = {
+            {"Issue", utils::ISSUE},
+            {"Execute", utils::EXEC}};
+        GCONFIG.replayThreat = availableDetThreat.at(GCONFIG.replayDetThreat);
+
+        map<std::string, utils::EpochScale> availableEpochScale = {
+            {"Iter", utils::ITERATION},
+            {"Loop", utils::LOOP},
+            {"Rtn", utils::ROUTINE}};
+        GCONFIG.epochSize = availableEpochScale.at(params->epochSize);
+
+        GCONFIG.lowerSeqNum = params->lowerSeqNum;
+        GCONFIG.upperSeqNum = params->upperSeqNum;
+        GCONFIG.hasLowerBound = params->hasLowerBound;
+        GCONFIG.hasUpperBound = params->hasUpperBound;
+        for (size_t i = 0; i < 65536; i++) {
+            GCONFIG.youngestSeqNums[i] = 0;
+        }
+
+        cerr << ZINFO
+             << "Hardware: " << GCONFIG.HWName
+             << "; Detection: " << GCONFIG.replayDetScheme
+             << "; Detection Threat: " << GCONFIG.replayDetThreat
+             << endl
+             << ZINFO
+             << "Max Replays: " << GCONFIG.maxReplays
+             << "; CCEnable: " << GCONFIG.CCEnable
+             << "; CCAssoc: " << GCONFIG.CCAssoc
+             << "; CCSet: " << GCONFIG.CCSets
+             << "; CCMissLatency: " << GCONFIG.CCMissLatency
+             << "; CCIdeal: " << GCONFIG.CCIdeal
+             << endl
+             << ZINFO
+             << "liftOnClear: " << GCONFIG.liftOnClear
+             << endl
+             << ZINFO
+             << "Epoch path: " << GCONFIG.epochInfoPath
+             << endl
+             << ZINFO
+             << "epochSize: " << params->epochSize
+             << "; deleteOnRetire: " << GCONFIG.deleteOnRetire
+             << "; activeRecords: " << GCONFIG.activeRecords
+             << "; checkAllRecords: " << GCONFIG.checkAllRecords
+             << "; sbHWStruct: " << GCONFIG.sbHWStruct
+             << "; counterSize: " << GCONFIG.counterSize
+             << endl;
+
+        if (GCONFIG.checkAllRecords) {
+            cerr << ZWARN
+                 << "Checking all records in SB!"
+                 << endl;
+        }
+    }
 }
 
-void
-BaseO3CPU::regStats()
-{
+void BaseO3CPU::regStats() {
     BaseCPU::regStats();
 }
 
@@ -85,10 +187,10 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
     : BaseO3CPU(params),
       itb(params->itb),
       dtb(params->dtb),
-      tickEvent([this]{ tick(); }, "FullO3CPU tick",
+      tickEvent([this] { tick(); }, "FullO3CPU tick",
                 false, Event::CPU_Tick_Pri),
-      threadExitEvent([this]{ exitThreads(); }, "FullO3CPU exit threads",
-                false, Event::CPU_Exit_Pri),
+      threadExitEvent([this] { exitThreads(); }, "FullO3CPU exit threads",
+                      false, Event::CPU_Exit_Pri),
 #ifndef NDEBUG
       instcount(0),
 #endif
@@ -100,7 +202,7 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
       commit(this, params),
 
       /* It is mandatory that all SMT threads use the same renaming mode as
-       * they are sharing registers and rename */
+     * they are sharing registers and rename */
       vecMode(RenameMode<TheISA::ISA>::init(params->isa[0])),
       regFile(params->numPhysIntRegs,
               params->numPhysFloatRegs,
@@ -129,8 +231,7 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
 
       globalSeqNum(1),
       system(params->system),
-      lastRunningCycle(curCycle())
-{
+      lastRunningCycle(curCycle()) {
     if (!params->switched_out) {
         _status = Running;
     } else {
@@ -192,14 +293,15 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
         active_threads = params->workload.size();
 
         if (active_threads > Impl::MaxThreads) {
-            panic("Workload Size too large. Increase the 'MaxThreads' "
-                  "constant in your O3CPU impl. file (e.g. o3/alpha/impl.hh) "
-                  "or edit your workload size.");
+            panic(
+                "Workload Size too large. Increase the 'MaxThreads' "
+                "constant in your O3CPU impl. file (e.g. o3/alpha/impl.hh) "
+                "or edit your workload size.");
         }
     }
 
     //Make Sure That this a Valid Architeture
-    assert(params->numPhysIntRegs   >= numThreads * TheISA::NumIntRegs);
+    assert(params->numPhysIntRegs >= numThreads * TheISA::NumIntRegs);
     assert(params->numPhysFloatRegs >= numThreads * TheISA::NumFloatRegs);
     assert(params->numPhysVecRegs >= numThreads * TheISA::NumVecRegs);
     assert(params->numPhysVecPredRegs >= numThreads * TheISA::NumVecPredRegs);
@@ -224,6 +326,21 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
 
         renameMap[tid].init(&regFile, TheISA::ZeroReg, invalidFPReg,
                             &freeList, vecMode);
+
+        switch (GCONFIG.replayDet) {
+            case utils::BUFFER:
+                squashBuffers[tid].reset(
+                    new SimpleSquashBuffer<Impl>(this, GCONFIG.maxSBSize, GCONFIG.projectedElemCnt));
+                break;
+            case utils::EPOCH:
+                squashBuffers[tid].reset(
+                    new EpochSquashBuffer<Impl>(this, GCONFIG.maxSBSize, GCONFIG.activeRecords,
+                                                GCONFIG.projectedElemCnt));
+                break;
+            default:
+                // do nothing
+                break;
+        }
     }
 
     // Initialize rename map to assign physical registers to the
@@ -241,7 +358,7 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
             PhysRegIdPtr phys_reg = freeList.getFloatReg();
             renameMap[tid].setEntry(RegId(FloatRegClass, ridx), phys_reg);
             commitRenameMap[tid].setEntry(
-                    RegId(FloatRegClass, ridx), phys_reg);
+                RegId(FloatRegClass, ridx), phys_reg);
         }
 
         /* Here we need two 'interfaces' the 'whole register' and the
@@ -259,7 +376,7 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
             /* Initialize the vector-element interface */
             for (RegIndex ridx = 0; ridx < TheISA::NumVecRegs; ++ridx) {
                 for (ElemIndex ldx = 0; ldx < TheISA::NumVecElemPerVecReg;
-                        ++ldx) {
+                     ++ldx) {
                     RegId lrid = RegId(VecElemClass, ridx, ldx);
                     PhysRegIdPtr phys_elem = freeList.getVecElem();
                     renameMap[tid].setEntry(lrid, phys_elem);
@@ -272,7 +389,7 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
             PhysRegIdPtr phys_reg = freeList.getVecPredReg();
             renameMap[tid].setEntry(RegId(VecPredRegClass, ridx), phys_reg);
             commitRenameMap[tid].setEntry(
-                    RegId(VecPredRegClass, ridx), phys_reg);
+                RegId(VecPredRegClass, ridx), phys_reg);
         }
 
         for (RegIndex ridx = 0; ridx < TheISA::NumCCRegs; ++ridx) {
@@ -288,6 +405,7 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
 
     // Setup the ROB for whichever stages need it.
     commit.setROB(&rob);
+    decode.setROB(&rob);
 
     lastActivatedCycle = 0;
 
@@ -306,19 +424,19 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
                 DPRINTF(O3CPU, "Workload[%i] process is %#x",
                         tid, this->thread[tid]);
                 this->thread[tid] = new typename FullO3CPU<Impl>::Thread(
-                        (typename Impl::O3CPU *)(this),
-                        tid, params->workload[tid]);
+                    (typename Impl::O3CPU *)(this),
+                    tid, params->workload[tid]);
 
                 //usedTids[tid] = true;
                 //threadMap[tid] = tid;
             } else {
                 //Allocate Empty thread so M5 can use later
                 //when scheduling threads to CPU
-                Process* dummy_proc = NULL;
+                Process *dummy_proc = NULL;
 
                 this->thread[tid] = new typename FullO3CPU<Impl>::Thread(
-                        (typename Impl::O3CPU *)(this),
-                        tid, dummy_proc);
+                    (typename Impl::O3CPU *)(this),
+                    tid, dummy_proc);
                 //usedTids[tid] = false;
             }
         }
@@ -333,7 +451,7 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
         // If we're using a checker, then the TC should be the
         // CheckerThreadContext.
         if (params->checker) {
-            tc = new CheckerThreadContext<O3ThreadContext<Impl> >(
+            tc = new CheckerThreadContext<O3ThreadContext<Impl>>(
                 o3_tc, this->checker);
         }
 
@@ -353,8 +471,10 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
 
     // FullO3CPU always requires an interrupt controller.
     if (!params->switched_out && interrupts.empty()) {
-        fatal("FullO3CPU %s has no interrupt controller.\n"
-              "Ensure createInterruptController() is called.\n", name());
+        fatal(
+            "FullO3CPU %s has no interrupt controller.\n"
+            "Ensure createInterruptController() is called.\n",
+            name());
     }
 
     for (ThreadID tid = 0; tid < this->numThreads; tid++)
@@ -362,18 +482,15 @@ FullO3CPU<Impl>::FullO3CPU(DerivO3CPUParams *params)
 }
 
 template <class Impl>
-FullO3CPU<Impl>::~FullO3CPU()
-{
+FullO3CPU<Impl>::~FullO3CPU() {
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::regProbePoints()
-{
+void FullO3CPU<Impl>::regProbePoints() {
     BaseCPU::regProbePoints();
 
     ppInstAccessComplete = new ProbePointArg<PacketPtr>(getProbeManager(), "InstAccessComplete");
-    ppDataAccessComplete = new ProbePointArg<std::pair<DynInstPtr, PacketPtr> >(getProbeManager(), "DataAccessComplete");
+    ppDataAccessComplete = new ProbePointArg<std::pair<DynInstPtr, PacketPtr>>(getProbeManager(), "DataAccessComplete");
 
     fetch.regProbePoints();
     rename.regProbePoints();
@@ -382,28 +499,29 @@ FullO3CPU<Impl>::regProbePoints()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::regStats()
-{
+void FullO3CPU<Impl>::regStats() {
     BaseO3CPU::regStats();
 
     // Register any of the O3CPU's stats here.
     timesIdled
         .name(name() + ".timesIdled")
-        .desc("Number of times that the entire CPU went into an idle state and"
-              " unscheduled itself")
+        .desc(
+            "Number of times that the entire CPU went into an idle state and"
+            " unscheduled itself")
         .prereq(timesIdled);
 
     idleCycles
         .name(name() + ".idleCycles")
-        .desc("Total number of cycles that the CPU has spent unscheduled due "
-              "to idling")
+        .desc(
+            "Total number of cycles that the CPU has spent unscheduled due "
+            "to idling")
         .prereq(idleCycles);
 
     quiesceCycles
         .name(name() + ".quiesceCycles")
-        .desc("Total number of cycles that CPU has spent quiesced or waiting "
-              "for an interrupt")
+        .desc(
+            "Total number of cycles that CPU has spent quiesced or waiting "
+            "for an interrupt")
         .prereq(quiesceCycles);
 
     // Number of Instructions simulated
@@ -438,13 +556,13 @@ FullO3CPU<Impl>::regStats()
         .name(name() + ".ipc")
         .desc("IPC: Instructions Per Cycle")
         .precision(6);
-    ipc =  committedInsts / numCycles;
+    ipc = committedInsts / numCycles;
 
     totalIpc
         .name(name() + ".ipc_total")
         .desc("IPC: Total IPC of All Threads")
         .precision(6);
-    totalIpc =  sum(committedInsts) / numCycles;
+    totalIpc = sum(committedInsts) / numCycles;
 
     this->fetch.regStats();
     this->decode.regStats();
@@ -512,12 +630,42 @@ FullO3CPU<Impl>::regStats()
         .name(name() + ".misc_regfile_writes")
         .desc("number of misc regfile writes")
         .prereq(miscRegfileWrites);
+
+    cpuSquashSet
+        .name(name() + ".squashSet")
+        .desc("Number of times squash was set in CPU");
+
+    cpuMemBitClears
+        .name(name() + ".cpuMemBitClears")
+        .desc("Number of Mem Bit clears at cpu");
+
+    cpuMemDecrements
+        .name(name() + ".cpuMemDecrements")
+        .desc("Number of Mem Counter Decrements at cpu");
+
+    cpuAllBitClears
+        .name(name() + ".cpuAllBitClears")
+        .desc("Number of All Bit clears at cpu");
+
+    cpuAllDecrements
+        .name(name() + ".cpuAllDecrements")
+        .desc("Number of All Counter Decrements at cpu");
+
+    cpuCCMisses
+        .name(name() + ".cpuCCMisses")
+        .desc("Number of Counter Cache misses at cpu");
+
+    cpuCCHits
+        .name(name() + ".cpuCCHits")
+        .desc("Number of Counter Cache hits at cpu");
+
+    cpuSBClears
+        .name(name() + ".cpuSBClears")
+        .desc("Number of SB clears");
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::tick()
-{
+void FullO3CPU<Impl>::tick() {
     DPRINTF(O3CPU, "\n\nFullO3CPU: Ticking main, FullO3CPU.\n");
     assert(!switchedOut());
     assert(drainState() != DrainState::Drained);
@@ -525,7 +673,7 @@ FullO3CPU<Impl>::tick()
     ++numCycles;
     updateCycleCounters(BaseCPU::CPU_STATE_ON);
 
-//    activity = false;
+    //    activity = false;
 
     //Tick each of the stages
     fetch.tick();
@@ -574,9 +722,7 @@ FullO3CPU<Impl>::tick()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::init()
-{
+void FullO3CPU<Impl>::init() {
     BaseCPU::init();
 
     for (ThreadID tid = 0; tid < numThreads; ++tid) {
@@ -595,9 +741,7 @@ FullO3CPU<Impl>::init()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::startup()
-{
+void FullO3CPU<Impl>::startup() {
     BaseCPU::startup();
     for (int tid = 0; tid < numThreads; ++tid)
         isa[tid]->startup(threadContexts[tid]);
@@ -610,9 +754,7 @@ FullO3CPU<Impl>::startup()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::activateThread(ThreadID tid)
-{
+void FullO3CPU<Impl>::activateThread(ThreadID tid) {
     list<ThreadID>::iterator isActive =
         std::find(activeThreads.begin(), activeThreads.end(), tid);
 
@@ -628,9 +770,7 @@ FullO3CPU<Impl>::activateThread(ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::deactivateThread(ThreadID tid)
-{
+void FullO3CPU<Impl>::deactivateThread(ThreadID tid) {
     //Remove From Active List, if Active
     list<ThreadID>::iterator thread_it =
         std::find(activeThreads.begin(), activeThreads.end(), tid);
@@ -639,7 +779,7 @@ FullO3CPU<Impl>::deactivateThread(ThreadID tid)
     assert(!switchedOut());
 
     if (thread_it != activeThreads.end()) {
-        DPRINTF(O3CPU,"[tid:%i] Removing from active threads list\n",
+        DPRINTF(O3CPU, "[tid:%i] Removing from active threads list\n",
                 tid);
         activeThreads.erase(thread_it);
     }
@@ -650,8 +790,7 @@ FullO3CPU<Impl>::deactivateThread(ThreadID tid)
 
 template <class Impl>
 Counter
-FullO3CPU<Impl>::totalInsts() const
-{
+FullO3CPU<Impl>::totalInsts() const {
     Counter total(0);
 
     ThreadID size = thread.size();
@@ -663,8 +802,7 @@ FullO3CPU<Impl>::totalInsts() const
 
 template <class Impl>
 Counter
-FullO3CPU<Impl>::totalOps() const
-{
+FullO3CPU<Impl>::totalOps() const {
     Counter total(0);
 
     ThreadID size = thread.size();
@@ -675,9 +813,7 @@ FullO3CPU<Impl>::totalOps() const
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::activateContext(ThreadID tid)
-{
+void FullO3CPU<Impl>::activateContext(ThreadID tid) {
     assert(!switchedOut());
 
     // Needs to set each stage to running as well.
@@ -714,10 +850,8 @@ FullO3CPU<Impl>::activateContext(ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::suspendContext(ThreadID tid)
-{
-    DPRINTF(O3CPU,"[tid:%i] Suspending Thread Context.\n", tid);
+void FullO3CPU<Impl>::suspendContext(ThreadID tid) {
+    DPRINTF(O3CPU, "[tid:%i] Suspending Thread Context.\n", tid);
     assert(!switchedOut());
 
     deactivateThread(tid);
@@ -735,11 +869,9 @@ FullO3CPU<Impl>::suspendContext(ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::haltContext(ThreadID tid)
-{
+void FullO3CPU<Impl>::haltContext(ThreadID tid) {
     //For now, this is the same as deallocate
-    DPRINTF(O3CPU,"[tid:%i] Halt Context called. Deallocating\n", tid);
+    DPRINTF(O3CPU, "[tid:%i] Halt Context called. Deallocating\n", tid);
     assert(!switchedOut());
 
     deactivateThread(tid);
@@ -749,10 +881,8 @@ FullO3CPU<Impl>::haltContext(ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::insertThread(ThreadID tid)
-{
-    DPRINTF(O3CPU,"[tid:%i] Initializing thread into CPU");
+void FullO3CPU<Impl>::insertThread(ThreadID tid) {
+    DPRINTF(O3CPU, "[tid:%i] Initializing thread into CPU");
     // Will change now that the PC and thread state is internal to the CPU
     // and not in the ThreadContext.
     ThreadContext *src_tc;
@@ -801,15 +931,12 @@ FullO3CPU<Impl>::insertThread(ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::removeThread(ThreadID tid)
-{
-    DPRINTF(O3CPU,"[tid:%i] Removing thread context from CPU.\n", tid);
+void FullO3CPU<Impl>::removeThread(ThreadID tid) {
+    DPRINTF(O3CPU, "[tid:%i] Removing thread context from CPU.\n", tid);
 
     // Copy Thread Data From RegFile
     // If thread is suspended, it might be re-allocated
     // this->copyToTC(tid);
-
 
     // @todo: 2-27-2008: Fix how we free up rename mappings
     // here to alleviate the case for double-freeing registers
@@ -836,7 +963,7 @@ FullO3CPU<Impl>::removeThread(ThreadID tid)
     // telling all the pipeline stages to drain first, and then
     // checking until the drain completes.  Once the pipeline is
     // drained, call resetEntries(). - 10-09-06 ktlim
-/*
+    /*
     if (activeThreads.size() >= 1) {
         commit.rob->resetEntries();
         iew.resetEntries();
@@ -845,31 +972,23 @@ FullO3CPU<Impl>::removeThread(ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setVectorsAsReady(ThreadID tid)
-{
+void FullO3CPU<Impl>::setVectorsAsReady(ThreadID tid) {
     if (vecMode == Enums::Elem) {
         for (auto v = 0; v < TheISA::NumVecRegs; v++)
             for (auto e = 0; e < TheISA::NumVecElemPerVecReg; e++)
                 scoreboard.setReg(
                     commitRenameMap[tid].lookup(
-                        RegId(VecElemClass, v, e)
-                    )
-                );
+                        RegId(VecElemClass, v, e)));
     } else if (vecMode == Enums::Full) {
         for (auto v = 0; v < TheISA::NumVecRegs; v++)
             scoreboard.setReg(
                 commitRenameMap[tid].lookup(
-                    RegId(VecRegClass, v)
-                )
-            );
+                    RegId(VecRegClass, v)));
     }
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::switchRenameMode(ThreadID tid, UnifiedFreeList* freelist)
-{
+void FullO3CPU<Impl>::switchRenameMode(ThreadID tid, UnifiedFreeList *freelist) {
     auto pc = this->pcState(tid);
 
     // new_mode is the new vector renaming mode
@@ -887,17 +1006,13 @@ FullO3CPU<Impl>::switchRenameMode(ThreadID tid, UnifiedFreeList* freelist)
 }
 
 template <class Impl>
-Fault
-FullO3CPU<Impl>::getInterrupts()
-{
+Fault FullO3CPU<Impl>::getInterrupts() {
     // Check if there are any outstanding interrupts
     return this->interrupts[0]->getInterrupt(this->threadContexts[0]);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::processInterrupts(const Fault &interrupt)
-{
+void FullO3CPU<Impl>::processInterrupts(const Fault &interrupt) {
     // Check for interrupts here.  For now can copy the code that
     // exists within isa_fullsys_traits.hh.  Also assume that thread 0
     // is the one that handles the interrupts.
@@ -912,21 +1027,17 @@ FullO3CPU<Impl>::processInterrupts(const Fault &interrupt)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::trap(const Fault &fault, ThreadID tid,
-                      const StaticInstPtr &inst)
-{
+void FullO3CPU<Impl>::trap(const Fault &fault, ThreadID tid,
+                           const StaticInstPtr &inst) {
     // Pass the thread's TC into the invoke method.
     fault->invoke(this->threadContexts[tid], inst);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::syscall(ThreadID tid, Fault *fault)
-{
+void FullO3CPU<Impl>::syscall(ThreadID tid, Fault *fault) {
     DPRINTF(O3CPU, "[tid:%i] Executing syscall().\n\n", tid);
 
-    DPRINTF(Activity,"Activity: syscall() called.\n");
+    DPRINTF(Activity, "Activity: syscall() called.\n");
 
     // Temporarily increase this by one to account for the syscall
     // instruction.
@@ -941,23 +1052,18 @@ FullO3CPU<Impl>::syscall(ThreadID tid, Fault *fault)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::serializeThread(CheckpointOut &cp, ThreadID tid) const
-{
+void FullO3CPU<Impl>::serializeThread(CheckpointOut &cp, ThreadID tid) const {
     thread[tid]->serialize(cp);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::unserializeThread(CheckpointIn &cp, ThreadID tid)
-{
+void FullO3CPU<Impl>::unserializeThread(CheckpointIn &cp, ThreadID tid) {
     thread[tid]->unserialize(cp);
 }
 
 template <class Impl>
 DrainState
-FullO3CPU<Impl>::drain()
-{
+FullO3CPU<Impl>::drain() {
     // Deschedule any power gating event (if any)
     deschedulePowerGatingEvent();
 
@@ -977,10 +1083,10 @@ FullO3CPU<Impl>::drain()
 
     // Wake the CPU and record activity so everything can drain out if
     // the CPU was not able to immediately drain.
-    if (!isCpuDrained())  {
+    if (!isCpuDrained()) {
         // If a thread is suspended, wake it up so it can be drained
         for (auto t : threadContexts) {
-            if (t->status() == ThreadContext::Suspended){
+            if (t->status() == ThreadContext::Suspended) {
                 DPRINTF(Drain, "Currently suspended so activate %i \n",
                         t->threadId());
                 t->activate();
@@ -1018,9 +1124,7 @@ FullO3CPU<Impl>::drain()
 }
 
 template <class Impl>
-bool
-FullO3CPU<Impl>::tryDrain()
-{
+bool FullO3CPU<Impl>::tryDrain() {
     if (drainState() != DrainState::Draining || !isCpuDrained())
         return false;
 
@@ -1034,9 +1138,7 @@ FullO3CPU<Impl>::tryDrain()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::drainSanityCheck() const
-{
+void FullO3CPU<Impl>::drainSanityCheck() const {
     assert(isCpuDrained());
     fetch.drainSanityCheck();
     decode.drainSanityCheck();
@@ -1046,9 +1148,7 @@ FullO3CPU<Impl>::drainSanityCheck() const
 }
 
 template <class Impl>
-bool
-FullO3CPU<Impl>::isCpuDrained() const
-{
+bool FullO3CPU<Impl>::isCpuDrained() const {
     bool drained(true);
 
     if (!instList.empty() || !removeList.empty()) {
@@ -1085,16 +1185,12 @@ FullO3CPU<Impl>::isCpuDrained() const
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::commitDrained(ThreadID tid)
-{
+void FullO3CPU<Impl>::commitDrained(ThreadID tid) {
     fetch.drainStall(tid);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::drainResume()
-{
+void FullO3CPU<Impl>::drainResume() {
     if (switchedOut())
         return;
 
@@ -1122,9 +1218,7 @@ FullO3CPU<Impl>::drainResume()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::switchOut()
-{
+void FullO3CPU<Impl>::switchOut() {
     DPRINTF(O3CPU, "Switching out\n");
     BaseCPU::switchOut();
 
@@ -1137,9 +1231,7 @@ FullO3CPU<Impl>::switchOut()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::takeOverFrom(BaseCPU *oldCPU)
-{
+void FullO3CPU<Impl>::takeOverFrom(BaseCPU *oldCPU) {
     BaseCPU::takeOverFrom(oldCPU);
 
     fetch.takeOverFrom();
@@ -1150,7 +1242,7 @@ FullO3CPU<Impl>::takeOverFrom(BaseCPU *oldCPU)
 
     assert(!tickEvent.scheduled());
 
-    FullO3CPU<Impl> *oldO3CPU = dynamic_cast<FullO3CPU<Impl>*>(oldCPU);
+    FullO3CPU<Impl> *oldO3CPU = dynamic_cast<FullO3CPU<Impl> *>(oldCPU);
     if (oldO3CPU)
         globalSeqNum = oldO3CPU->globalSeqNum;
 
@@ -1159,177 +1251,143 @@ FullO3CPU<Impl>::takeOverFrom(BaseCPU *oldCPU)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::verifyMemoryMode() const
-{
+void FullO3CPU<Impl>::verifyMemoryMode() const {
     if (!system->isTimingMode()) {
-        fatal("The O3 CPU requires the memory system to be in "
-              "'timing' mode.\n");
+        fatal(
+            "The O3 CPU requires the memory system to be in "
+            "'timing' mode.\n");
     }
 }
 
 template <class Impl>
 RegVal
-FullO3CPU<Impl>::readMiscRegNoEffect(int misc_reg, ThreadID tid) const
-{
+FullO3CPU<Impl>::readMiscRegNoEffect(int misc_reg, ThreadID tid) const {
     return this->isa[tid]->readMiscRegNoEffect(misc_reg);
 }
 
 template <class Impl>
 RegVal
-FullO3CPU<Impl>::readMiscReg(int misc_reg, ThreadID tid)
-{
+FullO3CPU<Impl>::readMiscReg(int misc_reg, ThreadID tid) {
     miscRegfileReads++;
     return this->isa[tid]->readMiscReg(misc_reg, tcBase(tid));
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setMiscRegNoEffect(int misc_reg, RegVal val, ThreadID tid)
-{
+void FullO3CPU<Impl>::setMiscRegNoEffect(int misc_reg, RegVal val, ThreadID tid) {
     this->isa[tid]->setMiscRegNoEffect(misc_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setMiscReg(int misc_reg, RegVal val, ThreadID tid)
-{
+void FullO3CPU<Impl>::setMiscReg(int misc_reg, RegVal val, ThreadID tid) {
     miscRegfileWrites++;
     this->isa[tid]->setMiscReg(misc_reg, val, tcBase(tid));
 }
 
 template <class Impl>
 RegVal
-FullO3CPU<Impl>::readIntReg(PhysRegIdPtr phys_reg)
-{
+FullO3CPU<Impl>::readIntReg(PhysRegIdPtr phys_reg) {
     intRegfileReads++;
     return regFile.readIntReg(phys_reg);
 }
 
 template <class Impl>
 RegVal
-FullO3CPU<Impl>::readFloatReg(PhysRegIdPtr phys_reg)
-{
+FullO3CPU<Impl>::readFloatReg(PhysRegIdPtr phys_reg) {
     fpRegfileReads++;
     return regFile.readFloatReg(phys_reg);
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::readVecReg(PhysRegIdPtr phys_reg) const
-        -> const VecRegContainer&
-{
+auto FullO3CPU<Impl>::readVecReg(PhysRegIdPtr phys_reg) const
+    -> const VecRegContainer & {
     vecRegfileReads++;
     return regFile.readVecReg(phys_reg);
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::getWritableVecReg(PhysRegIdPtr phys_reg)
-        -> VecRegContainer&
-{
+auto FullO3CPU<Impl>::getWritableVecReg(PhysRegIdPtr phys_reg)
+    -> VecRegContainer & {
     vecRegfileWrites++;
     return regFile.getWritableVecReg(phys_reg);
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::readVecElem(PhysRegIdPtr phys_reg) const -> const VecElem&
-{
+auto FullO3CPU<Impl>::readVecElem(PhysRegIdPtr phys_reg) const -> const VecElem & {
     vecRegfileReads++;
     return regFile.readVecElem(phys_reg);
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::readVecPredReg(PhysRegIdPtr phys_reg) const
-        -> const VecPredRegContainer&
-{
+auto FullO3CPU<Impl>::readVecPredReg(PhysRegIdPtr phys_reg) const
+    -> const VecPredRegContainer & {
     vecPredRegfileReads++;
     return regFile.readVecPredReg(phys_reg);
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::getWritableVecPredReg(PhysRegIdPtr phys_reg)
-        -> VecPredRegContainer&
-{
+auto FullO3CPU<Impl>::getWritableVecPredReg(PhysRegIdPtr phys_reg)
+    -> VecPredRegContainer & {
     vecPredRegfileWrites++;
     return regFile.getWritableVecPredReg(phys_reg);
 }
 
 template <class Impl>
 RegVal
-FullO3CPU<Impl>::readCCReg(PhysRegIdPtr phys_reg)
-{
+FullO3CPU<Impl>::readCCReg(PhysRegIdPtr phys_reg) {
     ccRegfileReads++;
     return regFile.readCCReg(phys_reg);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setIntReg(PhysRegIdPtr phys_reg, RegVal val)
-{
+void FullO3CPU<Impl>::setIntReg(PhysRegIdPtr phys_reg, RegVal val) {
     intRegfileWrites++;
     regFile.setIntReg(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setFloatReg(PhysRegIdPtr phys_reg, RegVal val)
-{
+void FullO3CPU<Impl>::setFloatReg(PhysRegIdPtr phys_reg, RegVal val) {
     fpRegfileWrites++;
     regFile.setFloatReg(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setVecReg(PhysRegIdPtr phys_reg, const VecRegContainer& val)
-{
+void FullO3CPU<Impl>::setVecReg(PhysRegIdPtr phys_reg, const VecRegContainer &val) {
     vecRegfileWrites++;
     regFile.setVecReg(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setVecElem(PhysRegIdPtr phys_reg, const VecElem& val)
-{
+void FullO3CPU<Impl>::setVecElem(PhysRegIdPtr phys_reg, const VecElem &val) {
     vecRegfileWrites++;
     regFile.setVecElem(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setVecPredReg(PhysRegIdPtr phys_reg,
-                               const VecPredRegContainer& val)
-{
+void FullO3CPU<Impl>::setVecPredReg(PhysRegIdPtr phys_reg,
+                                    const VecPredRegContainer &val) {
     vecPredRegfileWrites++;
     regFile.setVecPredReg(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setCCReg(PhysRegIdPtr phys_reg, RegVal val)
-{
+void FullO3CPU<Impl>::setCCReg(PhysRegIdPtr phys_reg, RegVal val) {
     ccRegfileWrites++;
     regFile.setCCReg(phys_reg, val);
 }
 
 template <class Impl>
 RegVal
-FullO3CPU<Impl>::readArchIntReg(int reg_idx, ThreadID tid)
-{
+FullO3CPU<Impl>::readArchIntReg(int reg_idx, ThreadID tid) {
     intRegfileReads++;
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-            RegId(IntRegClass, reg_idx));
+        RegId(IntRegClass, reg_idx));
 
     return regFile.readIntReg(phys_reg);
 }
 
 template <class Impl>
 RegVal
-FullO3CPU<Impl>::readArchFloatReg(int reg_idx, ThreadID tid)
-{
+FullO3CPU<Impl>::readArchFloatReg(int reg_idx, ThreadID tid) {
     fpRegfileReads++;
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
         RegId(FloatRegClass, reg_idx));
@@ -1338,59 +1396,48 @@ FullO3CPU<Impl>::readArchFloatReg(int reg_idx, ThreadID tid)
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::readArchVecReg(int reg_idx, ThreadID tid) const
-        -> const VecRegContainer&
-{
+auto FullO3CPU<Impl>::readArchVecReg(int reg_idx, ThreadID tid) const
+    -> const VecRegContainer & {
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-                RegId(VecRegClass, reg_idx));
+        RegId(VecRegClass, reg_idx));
     return readVecReg(phys_reg);
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::getWritableArchVecReg(int reg_idx, ThreadID tid)
-        -> VecRegContainer&
-{
+auto FullO3CPU<Impl>::getWritableArchVecReg(int reg_idx, ThreadID tid)
+    -> VecRegContainer & {
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-                RegId(VecRegClass, reg_idx));
+        RegId(VecRegClass, reg_idx));
     return getWritableVecReg(phys_reg);
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::readArchVecElem(const RegIndex& reg_idx, const ElemIndex& ldx,
-                                 ThreadID tid) const -> const VecElem&
-{
+auto FullO3CPU<Impl>::readArchVecElem(const RegIndex &reg_idx, const ElemIndex &ldx,
+                                      ThreadID tid) const -> const VecElem & {
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-                                RegId(VecElemClass, reg_idx, ldx));
+        RegId(VecElemClass, reg_idx, ldx));
     return readVecElem(phys_reg);
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::readArchVecPredReg(int reg_idx, ThreadID tid) const
-        -> const VecPredRegContainer&
-{
+auto FullO3CPU<Impl>::readArchVecPredReg(int reg_idx, ThreadID tid) const
+    -> const VecPredRegContainer & {
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-                RegId(VecPredRegClass, reg_idx));
+        RegId(VecPredRegClass, reg_idx));
     return readVecPredReg(phys_reg);
 }
 
 template <class Impl>
-auto
-FullO3CPU<Impl>::getWritableArchVecPredReg(int reg_idx, ThreadID tid)
-        -> VecPredRegContainer&
-{
+auto FullO3CPU<Impl>::getWritableArchVecPredReg(int reg_idx, ThreadID tid)
+    -> VecPredRegContainer & {
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-                RegId(VecPredRegClass, reg_idx));
+        RegId(VecPredRegClass, reg_idx));
     return getWritableVecPredReg(phys_reg);
 }
 
 template <class Impl>
 RegVal
-FullO3CPU<Impl>::readArchCCReg(int reg_idx, ThreadID tid)
-{
+FullO3CPU<Impl>::readArchCCReg(int reg_idx, ThreadID tid) {
     ccRegfileReads++;
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
         RegId(CCRegClass, reg_idx));
@@ -1399,124 +1446,99 @@ FullO3CPU<Impl>::readArchCCReg(int reg_idx, ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setArchIntReg(int reg_idx, RegVal val, ThreadID tid)
-{
+void FullO3CPU<Impl>::setArchIntReg(int reg_idx, RegVal val, ThreadID tid) {
     intRegfileWrites++;
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-            RegId(IntRegClass, reg_idx));
+        RegId(IntRegClass, reg_idx));
 
     regFile.setIntReg(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setArchFloatReg(int reg_idx, RegVal val, ThreadID tid)
-{
+void FullO3CPU<Impl>::setArchFloatReg(int reg_idx, RegVal val, ThreadID tid) {
     fpRegfileWrites++;
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-            RegId(FloatRegClass, reg_idx));
+        RegId(FloatRegClass, reg_idx));
 
     regFile.setFloatReg(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setArchVecReg(int reg_idx, const VecRegContainer& val,
-                               ThreadID tid)
-{
+void FullO3CPU<Impl>::setArchVecReg(int reg_idx, const VecRegContainer &val,
+                                    ThreadID tid) {
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-                RegId(VecRegClass, reg_idx));
+        RegId(VecRegClass, reg_idx));
     setVecReg(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setArchVecElem(const RegIndex& reg_idx, const ElemIndex& ldx,
-                                const VecElem& val, ThreadID tid)
-{
+void FullO3CPU<Impl>::setArchVecElem(const RegIndex &reg_idx, const ElemIndex &ldx,
+                                     const VecElem &val, ThreadID tid) {
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-                RegId(VecElemClass, reg_idx, ldx));
+        RegId(VecElemClass, reg_idx, ldx));
     setVecElem(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setArchVecPredReg(int reg_idx, const VecPredRegContainer& val,
-                                   ThreadID tid)
-{
+void FullO3CPU<Impl>::setArchVecPredReg(int reg_idx, const VecPredRegContainer &val,
+                                        ThreadID tid) {
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-                RegId(VecPredRegClass, reg_idx));
+        RegId(VecPredRegClass, reg_idx));
     setVecPredReg(phys_reg, val);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::setArchCCReg(int reg_idx, RegVal val, ThreadID tid)
-{
+void FullO3CPU<Impl>::setArchCCReg(int reg_idx, RegVal val, ThreadID tid) {
     ccRegfileWrites++;
     PhysRegIdPtr phys_reg = commitRenameMap[tid].lookup(
-            RegId(CCRegClass, reg_idx));
+        RegId(CCRegClass, reg_idx));
 
     regFile.setCCReg(phys_reg, val);
 }
 
 template <class Impl>
 TheISA::PCState
-FullO3CPU<Impl>::pcState(ThreadID tid)
-{
+FullO3CPU<Impl>::pcState(ThreadID tid) {
     return commit.pcState(tid);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::pcState(const TheISA::PCState &val, ThreadID tid)
-{
+void FullO3CPU<Impl>::pcState(const TheISA::PCState &val, ThreadID tid) {
     commit.pcState(val, tid);
 }
 
 template <class Impl>
-Addr
-FullO3CPU<Impl>::instAddr(ThreadID tid)
-{
+Addr FullO3CPU<Impl>::instAddr(ThreadID tid) {
     return commit.instAddr(tid);
 }
 
 template <class Impl>
-Addr
-FullO3CPU<Impl>::nextInstAddr(ThreadID tid)
-{
+Addr FullO3CPU<Impl>::nextInstAddr(ThreadID tid) {
     return commit.nextInstAddr(tid);
 }
 
 template <class Impl>
 MicroPC
-FullO3CPU<Impl>::microPC(ThreadID tid)
-{
+FullO3CPU<Impl>::microPC(ThreadID tid) {
     return commit.microPC(tid);
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::squashFromTC(ThreadID tid)
-{
+void FullO3CPU<Impl>::squashFromTC(ThreadID tid) {
     this->thread[tid]->noSquashFromTC = true;
     this->commit.generateTCEvent(tid);
 }
 
 template <class Impl>
 typename FullO3CPU<Impl>::ListIt
-FullO3CPU<Impl>::addInst(const DynInstPtr &inst)
-{
+FullO3CPU<Impl>::addInst(const DynInstPtr &inst) {
     instList.push_back(inst);
 
     return --(instList.end());
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::instDone(ThreadID tid, const DynInstPtr &inst)
-{
+void FullO3CPU<Impl>::instDone(ThreadID tid, const DynInstPtr &inst) {
     // Keep an instruction count.
     if (!inst->isMicroop() || inst->isLastMicroop()) {
         thread[tid]->numInst++;
@@ -1535,10 +1557,9 @@ FullO3CPU<Impl>::instDone(ThreadID tid, const DynInstPtr &inst)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::removeFrontInst(const DynInstPtr &inst)
-{
-    DPRINTF(O3CPU, "Removing committed instruction [tid:%i] PC %s "
+void FullO3CPU<Impl>::removeFrontInst(const DynInstPtr &inst) {
+    DPRINTF(O3CPU,
+            "Removing committed instruction [tid:%i] PC %s "
             "[sn:%lli]\n",
             inst->threadNumber, inst->pcState(), inst->seqNum);
 
@@ -1549,11 +1570,11 @@ FullO3CPU<Impl>::removeFrontInst(const DynInstPtr &inst)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::removeInstsNotInROB(ThreadID tid)
-{
-    DPRINTF(O3CPU, "Thread %i: Deleting instructions from instruction"
-            " list.\n", tid);
+void FullO3CPU<Impl>::removeInstsNotInROB(ThreadID tid) {
+    DPRINTF(O3CPU,
+            "Thread %i: Deleting instructions from instruction"
+            " list.\n",
+            tid);
 
     ListIt end_it;
 
@@ -1594,9 +1615,7 @@ FullO3CPU<Impl>::removeInstsNotInROB(ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::removeInstsUntil(const InstSeqNum &seq_num, ThreadID tid)
-{
+void FullO3CPU<Impl>::removeInstsUntil(const InstSeqNum &seq_num, ThreadID tid) {
     assert(!instList.empty());
 
     removeInstsThisCycle = true;
@@ -1605,12 +1624,12 @@ FullO3CPU<Impl>::removeInstsUntil(const InstSeqNum &seq_num, ThreadID tid)
 
     inst_iter--;
 
-    DPRINTF(O3CPU, "Deleting instructions from instruction "
+    DPRINTF(O3CPU,
+            "Deleting instructions from instruction "
             "list that are from [tid:%i] and above [sn:%lli] (end=%lli).\n",
             tid, seq_num, (*inst_iter)->seqNum);
 
     while ((*inst_iter)->seqNum > seq_num) {
-
         bool break_loop = (inst_iter == instList.begin());
 
         squashInstIt(inst_iter, tid);
@@ -1624,17 +1643,22 @@ FullO3CPU<Impl>::removeInstsUntil(const InstSeqNum &seq_num, ThreadID tid)
 
 template <class Impl>
 inline void
-FullO3CPU<Impl>::squashInstIt(const ListIt &instIt, ThreadID tid)
-{
+FullO3CPU<Impl>::squashInstIt(const ListIt &instIt, ThreadID tid) {
     if ((*instIt)->threadNumber == tid) {
-        DPRINTF(O3CPU, "Squashing instruction, "
+        DPRINTF(O3CPU,
+                "Squashing instruction, "
                 "[tid:%i] [sn:%lli] PC %s\n",
                 (*instIt)->threadNumber,
                 (*instIt)->seqNum,
                 (*instIt)->pcState());
 
+        int32_t squashBefore = (*instIt)->numReplays();
         // Mark it as squashed.
         (*instIt)->setSquashed();
+
+        if ((*instIt)->numReplays() > squashBefore) {
+            ++cpuSquashSet;
+        }
 
         // @todo: Formulate a consistent method for deleting
         // instructions from the instruction list
@@ -1644,11 +1668,10 @@ FullO3CPU<Impl>::squashInstIt(const ListIt &instIt, ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::cleanUpRemovedInsts()
-{
+void FullO3CPU<Impl>::cleanUpRemovedInsts() {
     while (!removeList.empty()) {
-        DPRINTF(O3CPU, "Removing instruction, "
+        DPRINTF(O3CPU,
+                "Removing instruction, "
                 "[tid:%i] [sn:%lli] PC %s\n",
                 (*removeList.front())->threadNumber,
                 (*removeList.front())->seqNum,
@@ -1670,9 +1693,7 @@ FullO3CPU<Impl>::removeAllInsts()
 }
 */
 template <class Impl>
-void
-FullO3CPU<Impl>::dumpInsts()
-{
+void FullO3CPU<Impl>::dumpInsts() {
     int num = 0;
 
     ListIt inst_list_it = instList.begin();
@@ -1680,11 +1701,12 @@ FullO3CPU<Impl>::dumpInsts()
     cprintf("Dumping Instruction List\n");
 
     while (inst_list_it != instList.end()) {
-        cprintf("Instruction:%i\nPC:%#x\n[tid:%i]\n[sn:%lli]\nIssued:%i\n"
-                "Squashed:%i\n\n",
-                num, (*inst_list_it)->instAddr(), (*inst_list_it)->threadNumber,
-                (*inst_list_it)->seqNum, (*inst_list_it)->isIssued(),
-                (*inst_list_it)->isSquashed());
+        cprintf(
+            "Instruction:%i\nPC:%#x\n[tid:%i]\n[sn:%lli]\nIssued:%i\n"
+            "Squashed:%i\n\n",
+            num, (*inst_list_it)->instAddr(), (*inst_list_it)->threadNumber,
+            (*inst_list_it)->seqNum, (*inst_list_it)->isIssued(),
+            (*inst_list_it)->isSquashed());
         inst_list_it++;
         ++num;
     }
@@ -1698,9 +1720,7 @@ FullO3CPU<Impl>::wakeDependents(const DynInstPtr &inst)
 }
 */
 template <class Impl>
-void
-FullO3CPU<Impl>::wakeCPU()
-{
+void FullO3CPU<Impl>::wakeCPU() {
     if (activityRec.active() || tickEvent.scheduled()) {
         DPRINTF(Activity, "CPU already running.\n");
         return;
@@ -1720,9 +1740,7 @@ FullO3CPU<Impl>::wakeCPU()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::wakeup(ThreadID tid)
-{
+void FullO3CPU<Impl>::wakeup(ThreadID tid) {
     if (this->thread[tid]->status() != ThreadContext::Suspended)
         return;
 
@@ -1734,8 +1752,7 @@ FullO3CPU<Impl>::wakeup(ThreadID tid)
 
 template <class Impl>
 ThreadID
-FullO3CPU<Impl>::getFreeTid()
-{
+FullO3CPU<Impl>::getFreeTid() {
     for (ThreadID tid = 0; tid < numThreads; tid++) {
         if (!tids[tid]) {
             tids[tid] = true;
@@ -1747,9 +1764,7 @@ FullO3CPU<Impl>::getFreeTid()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::updateThreadPriority()
-{
+void FullO3CPU<Impl>::updateThreadPriority() {
     if (activeThreads.size() > 1) {
         //DEFAULT TO ROUND ROBIN SCHEME
         //e.g. Move highest priority to end of thread list
@@ -1764,9 +1779,7 @@ FullO3CPU<Impl>::updateThreadPriority()
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::addThreadToExitingList(ThreadID tid)
-{
+void FullO3CPU<Impl>::addThreadToExitingList(ThreadID tid) {
     DPRINTF(O3CPU, "Thread %d is inserted to exitingThreads list\n", tid);
 
     // the thread trying to exit can't be already halted
@@ -1784,16 +1797,12 @@ FullO3CPU<Impl>::addThreadToExitingList(ThreadID tid)
 }
 
 template <class Impl>
-bool
-FullO3CPU<Impl>::isThreadExiting(ThreadID tid) const
-{
+bool FullO3CPU<Impl>::isThreadExiting(ThreadID tid) const {
     return exitingThreads.count(tid) == 1;
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::scheduleThreadExitEvent(ThreadID tid)
-{
+void FullO3CPU<Impl>::scheduleThreadExitEvent(ThreadID tid) {
     assert(exitingThreads.count(tid) == 1);
 
     // exit trap event has been processed. Now, the thread is ready to exit
@@ -1812,9 +1821,7 @@ FullO3CPU<Impl>::scheduleThreadExitEvent(ThreadID tid)
 }
 
 template <class Impl>
-void
-FullO3CPU<Impl>::exitThreads()
-{
+void FullO3CPU<Impl>::exitThreads() {
     // there must be at least one thread trying to exit
     assert(exitingThreads.size() > 0);
 
@@ -1831,6 +1838,63 @@ FullO3CPU<Impl>::exitThreads()
             it = exitingThreads.erase(it);
         } else {
             it++;
+        }
+    }
+}
+
+template <class Impl>
+void FullO3CPU<Impl>::mraDefenceUpdate(ThreadID tid, DynInstPtr inst) {
+    // MRA defense
+    // check MRA defenses are enabled
+    if ((GCONFIG.isSpectre || GCONFIG.isFuturistic)) {
+        // PC granularity checks
+        switch (GCONFIG.replayDet) {
+            case utils::NO_DETECT:
+                break;
+            case utils::BUFFER:
+                if (inst->isSquashSource()) {
+                    if (squashBuffer(tid)->clear(inst)) {
+                        cpuSBClears++;
+                        if (GCONFIG.liftOnClear) {
+                            rob.liftFences(tid);
+                        }
+                    }
+                }
+                break;
+            case utils::EPOCH:
+                // [Placeholder] EPOCH
+                if (inst->isEpochSeparator()) {
+                    DSTATE(EpochClear, inst);
+                    squashBuffer(tid)->clear(inst);
+                    cpuSBClears++;
+                }
+                if (GCONFIG.deleteOnRetire) {
+                    squashBuffer(tid)->retire(inst);
+                }
+                break;
+            case utils::COUNTER:
+                if (inst->isReplayed()) {
+                    if (GCONFIG.hw == utils::FENCE) {
+                        if (inst->isLoad()) {
+                            MRAPRINT(RetireBFLD, inst, inst->staticInst);
+                            inst->decrReplays();
+                            ++cpuMemDecrements;
+                            ++cpuAllDecrements;
+                            MRAPRINT(RetireAFLD, inst, inst->staticInst);
+                        }
+                    }
+                    // Fence everything
+                    else if (GCONFIG.hw == utils::FENCE_ALL) {
+                        MRAPRINT(RetireBFLDAll, inst, inst->staticInst);
+                        inst->decrReplays();
+                        ++cpuAllDecrements;
+                        if (inst->isLoad()) {
+                            ++cpuMemDecrements;
+                        }
+                        MRAPRINT(RetireAFLDAll, inst, inst->staticInst);
+                    }
+                }
+                break;
         }
     }
 }

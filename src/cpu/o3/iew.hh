@@ -468,6 +468,8 @@ class DefaultIEW
     /** Number of instructions executed per cycle. */
     Stats::Formula iewExecRate;
 
+    Stats::Scalar iewSquashes;
+
     /** Number of instructions sent to commit. */
     Stats::Vector iewInstsToCommit;
     /** Number of instructions that writeback. */

@@ -1,0 +1,155 @@
+#! /bin/bash
+
+if [ -z $GEM5_ROOT ]; then
+    echo "ENV variable GEM5_ROOT is not set"
+    exit 2
+fi
+
+if [ -z $WORKLOADS_ROOT ]; then
+    echo "ENV variable WORKLOADS_ROOT is not set"
+    exit 2
+fi
+
+usage() {
+    echo "usage: submit [ -h | --help ] config_files"
+    echo ""
+    echo "positional arguments:"
+    echo "  config_files             a list of configuration files"
+    echo ""
+    echo "optional arguments:"
+    echo "  -h, --help               show this help message and exit"
+}
+
+PARSED_ARGUMENTS=$(getopt -a -n submit -o h --long help -- "$@")
+
+if [ $? != 0 ]; then
+    usage
+    exit 1
+fi
+
+eval set -- "$PARSED_ARGUMENTS"
+while :
+do
+    case "$1" in
+        --)
+            shift; break
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        *) 
+            echo "Unexpected option: $1" >&2
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+JOB_CNT=0
+JOB_DIR=$PWD/jobs
+
+SUBMITTED=0
+
+if [ -d "$JOB_DIR" ]; then
+    rm -rf $JOB_DIR/*
+else
+    mkdir -p $JOB_DIR
+fi
+
+submit_job() {
+    local SCRIPT=$1
+    local BENCH=$2
+    local SIMPT=$3
+    local ARGS="$4 $BENCH $SIMPT"
+    local WEIGHT=$5
+    local OUTPUT=$(/bin/bash $SCRIPT $ARGS --dry-run 2>/dev/null)
+    if [ $? != 0 ] || [ ! -d $OUTPUT ]; then
+        echo "Dry run failed for $SCRIPT $ARGS" >&2
+        exit 2
+    else
+        echo "$WEIGHT" > $OUTPUT/weight
+    fi
+    
+    # write job script
+    local RUN_SH=$OUTPUT/run.sh
+    cat <<EOM >$RUN_SH
+#! /bin/bash
+
+rm -f $OUTPUT/QUEUED
+touch $OUTPUT/RUNNING
+
+$SCRIPT $ARGS --no-clear
+
+if [ \$? != 0 ] || [ ! -s $OUTPUT/stats.txt ]; then
+    touch $OUTPUT/ERRORED
+else
+    touch $OUTPUT/FINISHED
+fi
+rm -f $OUTPUT/RUNNING
+EOM
+    chmod +x $RUN_SH
+
+    JOB_CNT=$(expr $JOB_CNT + 1)
+    local JOB_FILE=$JOB_DIR/${JOB_CNT}.job
+
+    cat <<EOM >$JOB_FILE
+universe=vanilla
+executable=/bin/bash
+arguments=$RUN_SH
+output=$OUTPUT/condor.out
+log=$OUTPUT/condor.log
+error=$OUTPUT/condor.err
+getenv=true
+requirements=machine=="iacoma-perf"
+request_cpus=1
+request_memory=2GB
+nice_user=true
+initialdir=$OUTPUT
+queue
+EOM
+
+    local CLUSTER_ID=$(condor_submit $JOB_FILE | egrep -oh "[0-9]+\.")
+    touch $OUTPUT/QUEUED
+    echo "    + Submitted $BENCH #$SIMPT with cluster ID $CLUSTER_ID"
+
+    SUBMITTED=$(expr $SUBMITTED + 1)
+    if [ $SUBMITTED = 50 ]; then
+        echo ""
+        echo "Let condor take a break..."
+        echo ""
+        sleep 10
+        SUBMITTED=0
+    fi
+}
+
+
+submit() {
+    local CONFIG=$1
+    if [ ! -f $CONFIG ]; then
+        echo "Invalid config file $CONFIG" >&2
+        exit 1
+    fi
+
+    echo ""
+    echo ""
+    echo "*** Submit jobs for configure $CONFIG ***"
+    local SCRIPT=$(grep SCRIPT $CONFIG)
+    local SCRIPT=$GEM5_ROOT/scripts/${SCRIPT#*=}
+    local ARGS=$(grep ARGS $CONFIG)
+    local ARGS=${ARGS#*=}
+
+    for CKPT_DIR in $(ls -d $WORKLOADS_ROOT/ckpt/*/cpt.None.SIMP-*); do
+        local CKPT=$(basename $CKPT_DIR)
+        local CKPT_ID=${CKPT#*-}
+        local BENCH=$(basename $(dirname $CKPT_DIR))
+        local WEIGHT=$(grep " $CKPT_ID" $(dirname $CKPT_DIR)/results.weights | cut -d" " -f1)
+        submit_job $SCRIPT $BENCH $CKPT_ID "$ARGS" $WEIGHT
+    done
+}
+
+for CONFIG in "$@"; do
+    submit $CONFIG
+done
+
+rm -rf $JOB_DIR

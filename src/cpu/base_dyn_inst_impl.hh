@@ -51,24 +51,22 @@
 #include "config/the_isa.hh"
 #include "cpu/base_dyn_inst.hh"
 #include "cpu/exetrace.hh"
+#include "cpu/global_utils.hh"
 #include "debug/DynInst.hh"
 #include "debug/IQ.hh"
 #include "mem/request.hh"
 #include "sim/faults.hh"
+
+using namespace std;
+using bridge::GCONFIG;
 
 template <class Impl>
 BaseDynInst<Impl>::BaseDynInst(const StaticInstPtr &_staticInst,
                                const StaticInstPtr &_macroop,
                                TheISA::PCState _pc, TheISA::PCState _predPC,
                                InstSeqNum seq_num, ImplCPU *cpu)
-  : staticInst(_staticInst), cpu(cpu),
-    thread(nullptr),
-    traceData(nullptr),
-    macroop(_macroop),
-    memData(nullptr),
-    savedReq(nullptr),
-    reqToVerify(nullptr)
-{
+    : staticInst(_staticInst), cpu(cpu), thread(nullptr), traceData(nullptr), 
+      macroop(_macroop), memData(nullptr), savedReq(nullptr), reqToVerify(nullptr) {
     seqNum = seq_num;
 
     pc = _pc;
@@ -80,16 +78,13 @@ BaseDynInst<Impl>::BaseDynInst(const StaticInstPtr &_staticInst,
 template <class Impl>
 BaseDynInst<Impl>::BaseDynInst(const StaticInstPtr &_staticInst,
                                const StaticInstPtr &_macroop)
-    : staticInst(_staticInst), traceData(NULL), macroop(_macroop)
-{
+    : staticInst(_staticInst), traceData(NULL), macroop(_macroop) {
     seqNum = 0;
     initVars();
 }
 
 template <class Impl>
-void
-BaseDynInst<Impl>::initVars()
-{
+void BaseDynInst<Impl>::initVars() {
     memData = NULL;
     effAddr = 0;
     physEffAddr = 0;
@@ -120,25 +115,39 @@ BaseDynInst<Impl>::initVars()
         cpu->dumpInsts();
         dumpSNList();
 #endif
-        assert(cpu->instcount <= 1500);
+        // assert(cpu->instcount <= 1500);
     }
 
     DPRINTF(DynInst,
-        "DynInst: [sn:%lli] Instruction created. Instcount for %s = %i\n",
-        seqNum, cpu->name(), cpu->instcount);
+            "DynInst: [sn:%lli] Instruction created. Instcount for %s = %i\n",
+            seqNum, cpu->name(), cpu->instcount);
 #endif
 
 #ifdef DEBUG
     cpu->snList.insert(seqNum);
 #endif
 
+    if (isLoad())
+        typeCode = 'L';
+    else if (isStore())
+        typeCode = 'S';
+    else if (isControl())
+        typeCode = 'C';
+    else
+        typeCode = '*';
+
+    // handle violators
+    if (staticInst->_violator) {
+        is_violator = true;
+        violator_seqNum = staticInst->_violator_seqNum;
+        staticInst->_violator = false;
+    }
 }
 
 template <class Impl>
-BaseDynInst<Impl>::~BaseDynInst()
-{
+BaseDynInst<Impl>::~BaseDynInst() {
     if (memData) {
-        delete [] memData;
+        delete[] memData;
     }
 
     if (traceData) {
@@ -151,20 +160,17 @@ BaseDynInst<Impl>::~BaseDynInst()
     --cpu->instcount;
 
     DPRINTF(DynInst,
-        "DynInst: [sn:%lli] Instruction destroyed. Instcount for %s = %i\n",
-        seqNum, cpu->name(), cpu->instcount);
+            "DynInst: [sn:%lli] Instruction destroyed. Instcount for %s = %i\n",
+            seqNum, cpu->name(), cpu->instcount);
 #endif
 #ifdef DEBUG
     cpu->snList.erase(seqNum);
 #endif
-
 }
 
 #ifdef DEBUG
 template <class Impl>
-void
-BaseDynInst<Impl>::dumpSNList()
-{
+void BaseDynInst<Impl>::dumpSNList() {
     std::set<InstSeqNum>::iterator sn_it = cpu->snList.begin();
 
     int count = 0;
@@ -177,18 +183,14 @@ BaseDynInst<Impl>::dumpSNList()
 #endif
 
 template <class Impl>
-void
-BaseDynInst<Impl>::dump()
-{
+void BaseDynInst<Impl>::dump() {
     cprintf("T%d : %#08d `", threadNumber, pc.instAddr());
     std::cout << staticInst->disassemble(pc.instAddr());
     cprintf("'\n");
 }
 
 template <class Impl>
-void
-BaseDynInst<Impl>::dump(std::string &outstring)
-{
+void BaseDynInst<Impl>::dump(std::string &outstring) {
     std::ostringstream s;
     s << "T" << threadNumber << " : 0x" << pc.instAddr() << " "
       << staticInst->disassemble(pc.instAddr());
@@ -197,29 +199,23 @@ BaseDynInst<Impl>::dump(std::string &outstring)
 }
 
 template <class Impl>
-void
-BaseDynInst<Impl>::markSrcRegReady()
-{
+void BaseDynInst<Impl>::markSrcRegReady() {
     DPRINTF(IQ, "[sn:%lli] has %d ready out of %d sources. RTI %d)\n",
-            seqNum, readyRegs+1, numSrcRegs(), readyToIssue());
+            seqNum, readyRegs + 1, numSrcRegs(), readyToIssue());
     if (++readyRegs == numSrcRegs()) {
         setCanIssue();
     }
 }
 
 template <class Impl>
-void
-BaseDynInst<Impl>::markSrcRegReady(RegIndex src_idx)
-{
+void BaseDynInst<Impl>::markSrcRegReady(RegIndex src_idx) {
     _readySrcRegIdx[src_idx] = true;
 
     markSrcRegReady();
 }
 
 template <class Impl>
-bool
-BaseDynInst<Impl>::eaSrcsReady() const
-{
+bool BaseDynInst<Impl>::eaSrcsReady() const {
     // For now I am assuming that src registers 1..n-1 are the ones that the
     // EA calc depends on.  (i.e. src reg 0 is the source of the data to be
     // stored)
@@ -232,12 +228,62 @@ BaseDynInst<Impl>::eaSrcsReady() const
     return true;
 }
 
-
-
 template <class Impl>
-void
-BaseDynInst<Impl>::setSquashed()
-{
+void BaseDynInst<Impl>::setSquashed() {
+    DSTATE(Squashed, this);
+
+    // perfom MRA steps
+    if (!isSquashHandled()) {
+        setSquashHandled();
+
+        // check MRA defenses are enabled
+        if ((GCONFIG.isSpectre || GCONFIG.isFuturistic) &&
+            GCONFIG.replayDet != utils::NO_DETECT) {
+            if (isPendingSelfSquash()) {
+                setViolator(); // it's correct to hack staticInst only when it is squashed
+            }
+
+            // need to check that an instruction has truly executed on the EXEC threat model
+            if ((GCONFIG.replayThreat == utils::ISSUE) ||
+                ((GCONFIG.replayThreat == utils::EXEC) &&
+                 !this->isSquashBeforeExec() &&
+                 (isExecutionStarted() || isExecuted()))) {
+                // PC granularity checks
+                switch (GCONFIG.replayDet) {
+                    case utils::NO_DETECT:
+                        break;
+                    case utils::BUFFER:
+                        cpu->squashBuffer(threadNumber)
+                            ->insert(dynamic_cast<typename DynInstPtr::PtrType>(this));
+                        break;
+                    case utils::EPOCH:
+                        cpu->squashBuffer(threadNumber)
+                            ->insert(dynamic_cast<typename DynInstPtr::PtrType>(this));
+                        cpu->resetEpoch(threadNumber,
+                                        dynamic_cast<typename DynInstPtr::PtrType>(this));
+                        break;
+                    case utils::COUNTER:
+                        // Bit and counter checks
+                        // Fence only loads
+                        if (GCONFIG.hw == utils::FENCE) {
+                            if (isLoad()) {
+                                MRAPRINT(SquashBFLD, this, staticInst);
+                                incrReplays();
+                                MRAPRINT(SquashAFLD, this, staticInst);
+                            }
+                        }
+                        // Fence everything
+                        else if (GCONFIG.hw == utils::FENCE_ALL) {
+                            MRAPRINT(SquashBFLDAll, this, staticInst);
+                            incrReplays();
+                            MRAPRINT(SquashAFLDAll, this, staticInst);
+                        }
+                        break;
+                }
+            }
+        }
+    }
+
     status.set(Squashed);
 
     if (!isPinnedRegsRenamed() || isPinnedRegsSquashDone())
@@ -260,6 +306,4 @@ BaseDynInst<Impl>::setSquashed()
     setPinnedRegsSquashDone();
 }
 
-
-
-#endif//__CPU_BASE_DYN_INST_IMPL_HH__
+#endif  //__CPU_BASE_DYN_INST_IMPL_HH__

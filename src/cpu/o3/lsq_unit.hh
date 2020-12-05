@@ -573,6 +573,11 @@ class LSQUnit
     /** Number of times the LSQ is blocked due to the cache. */
     Stats::Scalar lsqCacheBlocked;
 
+    // stats for MRA
+    Stats::Scalar lqSquashSet;
+    Stats::Scalar sqSquashSet;
+
+
   public:
     /** Executes the load at the given index. */
     Fault read(LSQRequest *req, int load_idx);

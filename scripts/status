@@ -1,0 +1,23 @@
+#! /bin/bash
+
+if [ -z $GEM5_ROOT ]; then
+    echo "ENV variable GEM5_ROOT is not set" >&2
+    exit 2
+fi
+
+OUTPUT_ROOT=$GEM5_ROOT/output
+
+check_status() {
+    local CONF=$1
+    local ROOT=$OUTPUT_ROOT/$CONF
+    echo ""
+    echo "*** $CONF ***"
+    printf "%12s: %-5d\n" "Queued #" $(ls $ROOT/*/*/QUEUED 2> /dev/null | wc -l)
+    printf "%12s: %-5d\n" "Running #" $(ls $ROOT/*/*/RUNNING 2> /dev/null | wc -l)
+    printf "%12s: %-5d\n" "Finished #" $(ls $ROOT/*/*/FINISHED 2> /dev/null | wc -l)
+    printf "%12s: %-5d\n" "Errored #" $(ls $ROOT/*/*/ERRORED 2> /dev/null | wc -l)
+}
+
+for CONF in $(ls $OUTPUT_ROOT); do
+    check_status $(basename $CONF)
+done

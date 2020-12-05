@@ -77,6 +77,8 @@ class ROB
     /** Per-thread ROB status. */
     Status robStatus[Impl::MaxThreads];
 
+    bool underShadow[Impl::MaxThreads];
+
     /** ROB resource sharing policy for SMT mode. */
     SMTQueuePolicy robPolicy;
 
@@ -99,6 +101,8 @@ class ROB
 
     /** Takes over another CPU's thread. */
     void takeOverFrom();
+
+    void liftFences(ThreadID tid);
 
     /** Function to insert an instruction into the ROB. Note that whatever
      *  calls this function must ensure that there is enough space within the
@@ -202,6 +206,19 @@ class ROB
 
     /** Updates the tail instruction with the new youngest instruction. */
     void updateTail();
+
+    /** Checks whether instructions in the ROB reach VP */
+    void updateVPStatus();
+
+    bool checkShadow(DynInstPtr inst);
+
+    bool isUnderShadow(ThreadID tid) const {
+      return underShadow[tid];
+    }
+
+    void setUnderShadow(ThreadID tid) {
+      underShadow[tid] = true;
+    }
 
     /** Reads the PC of the oldest head instruction. */
 //    uint64_t readHeadPC();
@@ -327,6 +344,11 @@ class ROB
     Stats::Scalar robReads;
     // The number of rob_writes
     Stats::Scalar robWrites;
+
+    // stats for MRA
+    Stats::Scalar robSquashSet;
+    Stats::Scalar robCCMissZeroFences;
+    Stats::Scalar robCCMissNonZeroFences;
 };
 
 #endif //__CPU_O3_ROB_HH__

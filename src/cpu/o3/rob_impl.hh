@@ -44,12 +44,14 @@
 #include <list>
 
 #include "base/logging.hh"
+#include "cpu/global_utils.hh"
 #include "cpu/o3/rob.hh"
 #include "debug/Fetch.hh"
 #include "debug/ROB.hh"
 #include "params/DerivO3CPU.hh"
 
 using namespace std;
+using bridge::GCONFIG;
 
 template <class Impl>
 ROB<Impl>::ROB(O3CPU *_cpu, DerivO3CPUParams *params)
@@ -58,8 +60,7 @@ ROB<Impl>::ROB(O3CPU *_cpu, DerivO3CPUParams *params)
       numEntries(params->numROBEntries),
       squashWidth(params->squashWidth),
       numInstsInROB(0),
-      numThreads(params->numThreads)
-{
+      numThreads(params->numThreads) {
     //Figure out rob policy
     if (robPolicy == SMTQueuePolicy::Dynamic) {
         //Set Max Entries to Total ROB Capacity
@@ -81,7 +82,8 @@ ROB<Impl>::ROB(O3CPU *_cpu, DerivO3CPUParams *params)
     } else if (robPolicy == SMTQueuePolicy::Threshold) {
         DPRINTF(Fetch, "ROB sharing policy set to Threshold\n");
 
-        int threshold =  params->smtROBThreshold;;
+        int threshold = params->smtROBThreshold;
+        ;
 
         //Divide up by threshold amount
         for (ThreadID tid = 0; tid < numThreads; tid++) {
@@ -97,14 +99,13 @@ ROB<Impl>::ROB(O3CPU *_cpu, DerivO3CPUParams *params)
 }
 
 template <class Impl>
-void
-ROB<Impl>::resetState()
-{
-    for (ThreadID tid = 0; tid  < Impl::MaxThreads; tid++) {
+void ROB<Impl>::resetState() {
+    for (ThreadID tid = 0; tid < Impl::MaxThreads; tid++) {
         threadEntries[tid] = 0;
         squashIt[tid] = instList[tid].end();
         squashedSeqNum[tid] = 0;
         doneSquashing[tid] = true;
+        underShadow[tid] = false;
     }
     numInstsInROB = 0;
 
@@ -116,39 +117,30 @@ ROB<Impl>::resetState()
 
 template <class Impl>
 std::string
-ROB<Impl>::name() const
-{
+ROB<Impl>::name() const {
     return cpu->name() + ".rob";
 }
 
 template <class Impl>
-void
-ROB<Impl>::setActiveThreads(list<ThreadID> *at_ptr)
-{
+void ROB<Impl>::setActiveThreads(list<ThreadID> *at_ptr) {
     DPRINTF(ROB, "Setting active threads list pointer.\n");
     activeThreads = at_ptr;
 }
 
 template <class Impl>
-void
-ROB<Impl>::drainSanityCheck() const
-{
-    for (ThreadID tid = 0; tid  < numThreads; tid++)
+void ROB<Impl>::drainSanityCheck() const {
+    for (ThreadID tid = 0; tid < numThreads; tid++)
         assert(instList[tid].empty());
     assert(isEmpty());
 }
 
 template <class Impl>
-void
-ROB<Impl>::takeOverFrom()
-{
+void ROB<Impl>::takeOverFrom() {
     resetState();
 }
 
 template <class Impl>
-void
-ROB<Impl>::resetEntries()
-{
+void ROB<Impl>::resetEntries() {
     if (robPolicy != SMTQueuePolicy::Dynamic || numThreads > 1) {
         auto active_threads = activeThreads->size();
 
@@ -169,9 +161,7 @@ ROB<Impl>::resetEntries()
 }
 
 template <class Impl>
-int
-ROB<Impl>::entryAmount(ThreadID num_threads)
-{
+int ROB<Impl>::entryAmount(ThreadID num_threads) {
     if (robPolicy == SMTQueuePolicy::Partitioned) {
         return numEntries / num_threads;
     } else {
@@ -180,9 +170,7 @@ ROB<Impl>::entryAmount(ThreadID num_threads)
 }
 
 template <class Impl>
-int
-ROB<Impl>::countInsts()
-{
+int ROB<Impl>::countInsts() {
     int total = 0;
 
     for (ThreadID tid = 0; tid < numThreads; tid++)
@@ -193,15 +181,12 @@ ROB<Impl>::countInsts()
 
 template <class Impl>
 size_t
-ROB<Impl>::countInsts(ThreadID tid)
-{
+ROB<Impl>::countInsts(ThreadID tid) {
     return instList[tid].size();
 }
 
 template <class Impl>
-void
-ROB<Impl>::insertInst(const DynInstPtr &inst)
-{
+void ROB<Impl>::insertInst(const DynInstPtr &inst) {
     assert(inst);
 
     robWrites++;
@@ -236,9 +221,7 @@ ROB<Impl>::insertInst(const DynInstPtr &inst)
 }
 
 template <class Impl>
-void
-ROB<Impl>::retireHead(ThreadID tid)
-{
+void ROB<Impl>::retireHead(ThreadID tid) {
     robWrites++;
 
     assert(numInstsInROB > 0);
@@ -251,8 +234,10 @@ ROB<Impl>::retireHead(ThreadID tid)
 
     assert(head_inst->readyToCommit());
 
-    DPRINTF(ROB, "[tid:%i] Retiring head instruction, "
-            "instruction PC %s, [sn:%llu]\n", tid, head_inst->pcState(),
+    DPRINTF(ROB,
+            "[tid:%i] Retiring head instruction, "
+            "instruction PC %s, [sn:%llu]\n",
+            tid, head_inst->pcState(),
             head_inst->seqNum);
 
     --numInstsInROB;
@@ -271,9 +256,7 @@ ROB<Impl>::retireHead(ThreadID tid)
 }
 
 template <class Impl>
-bool
-ROB<Impl>::isHeadReady(ThreadID tid)
-{
+bool ROB<Impl>::isHeadReady(ThreadID tid) {
     robReads++;
     if (threadEntries[tid] != 0) {
         return instList[tid].front()->readyToCommit();
@@ -283,9 +266,7 @@ ROB<Impl>::isHeadReady(ThreadID tid)
 }
 
 template <class Impl>
-bool
-ROB<Impl>::canCommit()
-{
+bool ROB<Impl>::canCommit() {
     //@todo: set ActiveThreads through ROB or CPU
     list<ThreadID>::iterator threads = activeThreads->begin();
     list<ThreadID>::iterator end = activeThreads->end();
@@ -303,22 +284,18 @@ ROB<Impl>::canCommit()
 
 template <class Impl>
 unsigned
-ROB<Impl>::numFreeEntries()
-{
+ROB<Impl>::numFreeEntries() {
     return numEntries - numInstsInROB;
 }
 
 template <class Impl>
 unsigned
-ROB<Impl>::numFreeEntries(ThreadID tid)
-{
+ROB<Impl>::numFreeEntries(ThreadID tid) {
     return maxEntries[tid] - threadEntries[tid];
 }
 
 template <class Impl>
-void
-ROB<Impl>::doSquash(ThreadID tid)
-{
+void ROB<Impl>::doSquash(ThreadID tid) {
     robWrites++;
     DPRINTF(ROB, "[tid:%i] Squashing instructions until [sn:%llu].\n",
             tid, squashedSeqNum[tid]);
@@ -341,12 +318,13 @@ ROB<Impl>::doSquash(ThreadID tid)
          numSquashed < squashWidth &&
          squashIt[tid] != instList[tid].end() &&
          (*squashIt[tid])->seqNum > squashedSeqNum[tid];
-         ++numSquashed)
-    {
+         ++numSquashed) {
         DPRINTF(ROB, "[tid:%i] Squashing instruction PC %s, seq num %i.\n",
                 (*squashIt[tid])->threadNumber,
                 (*squashIt[tid])->pcState(),
                 (*squashIt[tid])->seqNum);
+
+        int32_t squashBefore = (*squashIt[tid])->numReplays();
 
         // Mark the instruction as squashed, and ready to commit so that
         // it can drain out of the pipeline.
@@ -354,9 +332,13 @@ ROB<Impl>::doSquash(ThreadID tid)
 
         (*squashIt[tid])->setCanCommit();
 
+        if ((*squashIt[tid])->numReplays() > squashBefore) {
+            ++robSquashSet;
+        }
 
         if (squashIt[tid] == instList[tid].begin()) {
-            DPRINTF(ROB, "Reached head of instruction list while "
+            DPRINTF(ROB,
+                    "Reached head of instruction list while "
                     "squashing.\n");
 
             squashIt[tid] = instList[tid].end();
@@ -375,7 +357,6 @@ ROB<Impl>::doSquash(ThreadID tid)
         squashIt[tid]--;
     }
 
-
     // Check if ROB is done squashing.
     if ((*squashIt[tid])->seqNum <= squashedSeqNum[tid]) {
         DPRINTF(ROB, "[tid:%i] Done squashing instructions.\n",
@@ -391,11 +372,8 @@ ROB<Impl>::doSquash(ThreadID tid)
     }
 }
 
-
 template <class Impl>
-void
-ROB<Impl>::updateHead()
-{
+void ROB<Impl>::updateHead() {
     InstSeqNum lowest_num = 0;
     bool first_valid = true;
 
@@ -431,13 +409,10 @@ ROB<Impl>::updateHead()
     if (first_valid) {
         head = instList[0].end();
     }
-
 }
 
 template <class Impl>
-void
-ROB<Impl>::updateTail()
-{
+void ROB<Impl>::updateTail() {
     tail = instList[0].end();
     bool first_valid = true;
 
@@ -471,13 +446,93 @@ ROB<Impl>::updateTail()
     }
 }
 
+template <class Impl>
+void ROB<Impl>::liftFences(ThreadID tid) {
+    for (auto &inst : instList[tid]) {
+        inst->liftFence();
+    }
+}
 
 template <class Impl>
-void
-ROB<Impl>::squash(InstSeqNum squash_num, ThreadID tid)
-{
+void ROB<Impl>::updateVPStatus() {
+    for (auto tid : *activeThreads) {
+        if (instList[tid].empty()) {
+            continue;
+        }
+
+        if (GCONFIG.CCEnable && !GCONFIG.CCIdeal) {
+            for (auto inst : instList[tid]) {
+                // on a CC miss the fetch of the counter
+                // if the counter return 0 the fence was unnecessary so clear it
+                if (inst->needFetchCC) {
+                    bool CChit = false;
+                    if (curTick() >= inst->readyByCC) {
+                        CChit = true;
+                    } else {
+                        // if this instruction is not ready
+                        // later instructions won't be ready either
+                        break;
+                    }
+                    if (CChit && !inst->isReplayed()) {
+                        inst->liftFence();
+                        inst->needFetchCC = false;
+                        ++robCCMissZeroFences;
+                    } else if (CChit && inst->isReplayed()) {
+                        ++robCCMissNonZeroFences;
+                        inst->needFetchCC = false;
+                    }
+                }
+            }
+        }
+
+        underShadow[tid] = false;
+        for (auto inst : instList[tid]) {
+            if (!underShadow[tid] && !inst->isReachedVP()) {
+                inst->setReachedVP();
+            }
+
+            if (checkShadow(inst)) {
+                underShadow[tid] = true;
+                break;
+            }
+        }
+    }
+}
+
+template <class Impl>
+bool ROB<Impl>::checkShadow(DynInstPtr inst) {
+    if ((inst->isCondCtrl() || inst->isIndirectCtrl() ||
+         inst->isReturn() || inst->isCall() || inst->isSyscall()) &&
+        GCONFIG.isSpectre) {
+        if (!inst->readyToCommit() || inst->getFault() != NoFault ||
+            inst->isSquashed()) {
+            return true;
+        }
+    }
+
+    if (GCONFIG.isFuturistic) {
+        if (inst->isStore() &&
+            (!inst->effAddrValid() || inst->getFault() != NoFault ||
+             inst->isSquashed())) {
+            return true;
+        }
+
+        if (inst->isLoad()) {
+            return true;
+        }
+
+        if (inst->isDiv()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+template <class Impl>
+void ROB<Impl>::squash(InstSeqNum squash_num, ThreadID tid) {
     if (isEmpty(tid)) {
-        DPRINTF(ROB, "Does not need to squash due to being empty "
+        DPRINTF(ROB,
+                "Does not need to squash due to being empty "
                 "[sn:%llu]\n",
                 squash_num);
 
@@ -503,9 +558,8 @@ ROB<Impl>::squash(InstSeqNum squash_num, ThreadID tid)
 }
 
 template <class Impl>
-const typename Impl::DynInstPtr&
-ROB<Impl>::readHeadInst(ThreadID tid)
-{
+const typename Impl::DynInstPtr &
+ROB<Impl>::readHeadInst(ThreadID tid) {
     if (threadEntries[tid] != 0) {
         InstIt head_thread = instList[tid].begin();
 
@@ -519,8 +573,7 @@ ROB<Impl>::readHeadInst(ThreadID tid)
 
 template <class Impl>
 typename Impl::DynInstPtr
-ROB<Impl>::readTailInst(ThreadID tid)
-{
+ROB<Impl>::readTailInst(ThreadID tid) {
     InstIt tail_thread = instList[tid].end();
     tail_thread--;
 
@@ -528,9 +581,7 @@ ROB<Impl>::readTailInst(ThreadID tid)
 }
 
 template <class Impl>
-void
-ROB<Impl>::regStats()
-{
+void ROB<Impl>::regStats() {
     using namespace Stats;
     robReads
         .name(name() + ".rob_reads")
@@ -539,12 +590,23 @@ ROB<Impl>::regStats()
     robWrites
         .name(name() + ".rob_writes")
         .desc("The number of ROB writes");
+
+    robSquashSet
+        .name(name() + ".squashSet")
+        .desc("Number of times squash was set in ROB");
+
+    robCCMissZeroFences
+        .name(name() + ".robCCMissZeroFences")
+        .desc("Number of times Counter Cache miss with zero counter in ROB");
+
+    robCCMissNonZeroFences
+        .name(name() + ".robCCMissNonZeroFences")
+        .desc("Number of times Counter Cache miss with non zero counter in ROB");
 }
 
 template <class Impl>
 typename Impl::DynInstPtr
-ROB<Impl>::findInst(ThreadID tid, InstSeqNum squash_inst)
-{
+ROB<Impl>::findInst(ThreadID tid, InstSeqNum squash_inst) {
     for (InstIt it = instList[tid].begin(); it != instList[tid].end(); it++) {
         if ((*it)->seqNum == squash_inst) {
             return *it;
@@ -553,4 +615,4 @@ ROB<Impl>::findInst(ThreadID tid, InstSeqNum squash_inst)
     return NULL;
 }
 
-#endif//__CPU_O3_ROB_IMPL_HH__
+#endif  //__CPU_O3_ROB_IMPL_HH__

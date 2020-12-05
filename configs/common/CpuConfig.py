@@ -56,9 +56,62 @@ def config_etrace(cpu_cls, cpu_list, options):
             # limitation as such stalls will get captured in the trace
             # as compute delay. For replay, ROB, LQ and SQ sizes are
             # modelled in the Trace CPU.
-            cpu.numROBEntries = 512;
-            cpu.LQEntries = 128;
-            cpu.SQEntries = 128;
+            cpu.numROBEntries = 512
+            cpu.LQEntries = 128
+            cpu.SQEntries = 128
     else:
         fatal("%s does not support data dependency tracing. Use a CPU model of"
               " type or inherited from DerivO3CPU.", cpu_cls)
+
+
+def config_extra(cpu_cls, cpu_list, options):
+    if issubclass(cpu_cls, m5.objects.DerivO3CPU):
+        if options.needsTSO == None or options.threatModel == "":
+            fatal("Need to provide needsTSO and scheme to run simulation with DerivO3CPU")
+
+        for cpu in cpu_list:
+            cpu.needsTSO = options.needsTSO
+            cpu.maxInsts = options.maxinsts
+            cpu.HWName   = options.HWName
+            cpu.threatModel = options.threatModel
+            cpu.replayDetScheme = options.replayDetScheme
+            cpu.sbHWStruct = options.sbHWStruct
+            cpu.replayDetThreat = options.replayDetThreat
+
+            cpu.maxReplays = options.maxReplays
+            cpu.CCEnable = options.replayDetScheme == 'Counter'
+            cpu.CCAssoc = options.CCAssoc
+            cpu.CCSets = options.CCSets
+            cpu.CCMissLatency = options.CCMissLatency
+            cpu.CCIdeal = options.CCIdeal
+
+            cpu.maxSBSize  = options.maxSBSize
+            cpu.liftOnClear = options.liftOnClear
+            cpu.projectedElemCnt = options.projectedElemCnt
+
+            cpu.epochInfoPath = options.epoch_path
+            cpu.epochSize     = options.epoch_size
+            cpu.deleteOnRetire = options.deleteOnRetire
+            cpu.activeRecords = options.activeRecords
+            cpu.checkAllRecords = options.checkAllRecords
+            cpu.counterSize = options.counterSize
+
+            if cpu.threatModel == 'Unsafe':
+                cpu.isSpectre = False
+                cpu.isFuturistic = False
+                cpu.HWName = 'Unsafe'
+            elif cpu.threatModel == 'Spectre':
+                cpu.isSpectre = True
+                cpu.isFuturistic = False
+                assert(cpu.HWName != 'Unsafe' and 'Unsafe CPU is vulnerable to Spectre')
+            elif cpu.threatModel == 'Futuristic':
+                cpu.isSpectre = True
+                cpu.isFuturistic = True
+                assert(cpu.HWName != 'Unsafe' and 'Unsafe CPU is vulnerable to Futuristic')
+            else:
+                fatal('Unknow threat model: {}'.format(cpu.threatModel))
+
+            cpu.lowerSeqNum = options.dstate_start
+            cpu.hasLowerBound = options.dstate_start != 0
+            cpu.upperSeqNum = options.dstate_end
+            cpu.hasUpperBound = options.dstate_end != 0

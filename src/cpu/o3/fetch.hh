@@ -54,6 +54,7 @@
 #include "mem/port.hh"
 #include "sim/eventq.hh"
 #include "sim/probe/probe.hh"
+#include "cpu/global_utils.hh"
 
 struct DerivO3CPUParams;
 template <class Impl>
@@ -215,6 +216,8 @@ class DefaultFetch
     /** To probe when a fetch request is successfully sent. */
     ProbePointArg<RequestPtr> *ppFetchRequestSent;
 
+    utils::CounterMap_p CCMap;
+
   public:
     /** DefaultFetch constructor. */
     DefaultFetch(O3CPU *_cpu, DerivO3CPUParams *params);
@@ -260,6 +263,12 @@ class DefaultFetch
 
     /** Takes over from another CPU's thread. */
     void takeOverFrom();
+
+    // create counter cache
+    void counterCacheSetup(std::string name, utils::CounterCache_p &cache_p,
+      utils::CounterMap_p map_p, size_t assoc, size_t setn, uint64_t miss_latency,
+      bool enable, bool ideal);
+
 
     /**
      * Stall the fetch stage after reaching a safe drain point.
@@ -597,6 +606,12 @@ class DefaultFetch
     Stats::Formula branchRate;
     /** Number of instruction fetched per cycle. */
     Stats::Formula fetchRate;
+
+    // MRA Fetch stats
+    Stats::Scalar fetchMemFences;
+    Stats::Scalar fetchAllFences;
+    Stats::Scalar fetchCCHits;
+    Stats::Scalar fetchCCMisses;
 };
 
 #endif //__CPU_O3_FETCH_HH__

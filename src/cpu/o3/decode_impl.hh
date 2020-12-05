@@ -41,11 +41,17 @@
 #ifndef __CPU_O3_DECODE_IMPL_HH__
 #define __CPU_O3_DECODE_IMPL_HH__
 
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+
+#include "cpu/colors.hh"
 #include "arch/types.hh"
 #include "base/trace.hh"
 #include "config/the_isa.hh"
-#include "cpu/o3/decode.hh"
+#include "cpu/global_utils.hh"
 #include "cpu/inst_seq.hh"
+#include "cpu/o3/decode.hh"
 #include "debug/Activity.hh"
 #include "debug/Decode.hh"
 #include "debug/O3PipeView.hh"
@@ -54,9 +60,11 @@
 
 // clang complains about std::set being overloaded with Packet::set if
 // we open up the entire namespace std
+using bridge::GCONFIG;
 using std::list;
+using namespace std;
 
-template<class Impl>
+template <class Impl>
 DefaultDecode<Impl>::DefaultDecode(O3CPU *_cpu, DerivO3CPUParams *params)
     : cpu(_cpu),
       renameToDecodeDelay(params->renameToDecodeDelay),
@@ -64,43 +72,95 @@ DefaultDecode<Impl>::DefaultDecode(O3CPU *_cpu, DerivO3CPUParams *params)
       commitToDecodeDelay(params->commitToDecodeDelay),
       fetchToDecodeDelay(params->fetchToDecodeDelay),
       decodeWidth(params->decodeWidth),
-      numThreads(params->numThreads)
-{
+      numThreads(params->numThreads) {
     if (decodeWidth > Impl::MaxWidth)
-        fatal("decodeWidth (%d) is larger than compiled limit (%d),\n"
-             "\tincrease MaxWidth in src/cpu/o3/impl.hh\n",
-             decodeWidth, static_cast<int>(Impl::MaxWidth));
+        fatal(
+            "decodeWidth (%d) is larger than compiled limit (%d),\n"
+            "\tincrease MaxWidth in src/cpu/o3/impl.hh\n",
+            decodeWidth, static_cast<int>(Impl::MaxWidth));
 
     // @todo: Make into a parameter
-    skidBufferMax = (fetchToDecodeDelay + 1) *  params->fetchWidth;
+    skidBufferMax = (fetchToDecodeDelay + 1) * params->fetchWidth;
     for (int tid = 0; tid < Impl::MaxThreads; tid++) {
         stalls[tid] = {false};
         decodeStatus[tid] = Idle;
+        epochStatus[tid] = 0;
+        _epochIntervalCnt[tid] = 0;
         bdelayDoneSeqNum[tid] = 0;
         squashInst[tid] = nullptr;
         squashAfterDelaySlot[tid] = 0;
     }
+
+    if (GCONFIG.replayDet == utils::EPOCH) {
+        bool r = readEpochInfo();
+        if (!r) panic("Failed to open epoch file");
+    }
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::startupStage()
-{
+template <class Impl>
+bool DefaultDecode<Impl>::readEpochInfo() {
+    ifstream infile(GCONFIG.epochInfoPath);
+    if (infile.is_open()) {
+        cerr << ZINFO
+             << "Opened epoch file at: \""
+             << GCONFIG.epochInfoPath
+             << "\" :)"
+             << endl;
+
+        string oneline;
+        while (getline(infile, oneline)) {
+            Addr pc;
+            char eMarker;
+            utils::EpochScale eScale;
+            istringstream iss(oneline);
+            iss >> hex >> pc >> eMarker;
+            switch (eMarker) {
+                case 'I':
+                    eScale = utils::ITERATION;
+                    break;
+                case 'L':
+                    eScale = utils::LOOP;
+                    break;
+                case 'R':
+                    eScale = utils::ROUTINE;
+                    break;
+                default:
+                    eScale = utils::INVALID;
+                    break;
+            }
+
+            if (!IN_MAP(pc, epochInfo)) {
+                epochInfo[pc] = eScale;
+            }
+            else {
+                epochInfo[pc] = std::max(epochInfo[pc], eScale);
+            }
+        }
+        return true;
+    }
+    else {
+        cerr << ZERROR
+             << "Cannot open epoch file at: \""
+             << GCONFIG.epochInfoPath
+             << "\" :("
+             << endl;
+        return false;
+    }
+}
+
+template <class Impl>
+void DefaultDecode<Impl>::startupStage() {
     resetStage();
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::clearStates(ThreadID tid)
-{
+template <class Impl>
+void DefaultDecode<Impl>::clearStates(ThreadID tid) {
     decodeStatus[tid] = Idle;
     stalls[tid].rename = false;
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::resetStage()
-{
+template <class Impl>
+void DefaultDecode<Impl>::resetStage() {
     _status = Inactive;
 
     // Setup status, make sure stall signals are clear.
@@ -113,15 +173,12 @@ DefaultDecode<Impl>::resetStage()
 
 template <class Impl>
 std::string
-DefaultDecode<Impl>::name() const
-{
+DefaultDecode<Impl>::name() const {
     return cpu->name() + ".decode";
 }
 
 template <class Impl>
-void
-DefaultDecode<Impl>::regStats()
-{
+void DefaultDecode<Impl>::regStats() {
     decodeIdleCycles
         .name(name() + ".IdleCycles")
         .desc("Number of cycles decode is idle")
@@ -152,8 +209,9 @@ DefaultDecode<Impl>::regStats()
         .prereq(decodeBranchMispred);
     decodeControlMispred
         .name(name() + ".ControlMispred")
-        .desc("Number of times decode detected an instruction incorrectly"
-              " predicted as a control")
+        .desc(
+            "Number of times decode detected an instruction incorrectly"
+            " predicted as a control")
         .prereq(decodeControlMispred);
     decodeDecodedInsts
         .name(name() + ".DecodedInsts")
@@ -163,12 +221,20 @@ DefaultDecode<Impl>::regStats()
         .name(name() + ".SquashedInsts")
         .desc("Number of squashed instructions handled by decode")
         .prereq(decodeSquashedInsts);
+
+    decodeSquashSet
+        .name(name() + ".squashSet")
+        .desc("number of times squash was set in Decode");
+
+    epochInterval
+        .init(0, 300, 50)
+        .name(name() + ".epochInterval")
+        .desc("Epoch interval")
+        .flags(Stats::pdf);
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::setTimeBuffer(TimeBuffer<TimeStruct> *tb_ptr)
-{
+template <class Impl>
+void DefaultDecode<Impl>::setTimeBuffer(TimeBuffer<TimeStruct> *tb_ptr) {
     timeBuffer = tb_ptr;
 
     // Setup wire to write information back to fetch.
@@ -180,37 +246,29 @@ DefaultDecode<Impl>::setTimeBuffer(TimeBuffer<TimeStruct> *tb_ptr)
     fromCommit = timeBuffer->getWire(-commitToDecodeDelay);
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::setDecodeQueue(TimeBuffer<DecodeStruct> *dq_ptr)
-{
+template <class Impl>
+void DefaultDecode<Impl>::setDecodeQueue(TimeBuffer<DecodeStruct> *dq_ptr) {
     decodeQueue = dq_ptr;
 
     // Setup wire to write information to proper place in decode queue.
     toRename = decodeQueue->getWire(0);
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::setFetchQueue(TimeBuffer<FetchStruct> *fq_ptr)
-{
+template <class Impl>
+void DefaultDecode<Impl>::setFetchQueue(TimeBuffer<FetchStruct> *fq_ptr) {
     fetchQueue = fq_ptr;
 
     // Setup wire to read information from fetch queue.
     fromFetch = fetchQueue->getWire(-fetchToDecodeDelay);
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::setActiveThreads(std::list<ThreadID> *at_ptr)
-{
+template <class Impl>
+void DefaultDecode<Impl>::setActiveThreads(std::list<ThreadID> *at_ptr) {
     activeThreads = at_ptr;
 }
 
 template <class Impl>
-void
-DefaultDecode<Impl>::drainSanityCheck() const
-{
+void DefaultDecode<Impl>::drainSanityCheck() const {
     for (ThreadID tid = 0; tid < numThreads; ++tid) {
         assert(insts[tid].empty());
         assert(skidBuffer[tid].empty());
@@ -218,42 +276,35 @@ DefaultDecode<Impl>::drainSanityCheck() const
 }
 
 template <class Impl>
-bool
-DefaultDecode<Impl>::isDrained() const
-{
+bool DefaultDecode<Impl>::isDrained() const {
     for (ThreadID tid = 0; tid < numThreads; ++tid) {
         if (!insts[tid].empty() || !skidBuffer[tid].empty() ||
-                (decodeStatus[tid] != Running && decodeStatus[tid] != Idle))
+            (decodeStatus[tid] != Running && decodeStatus[tid] != Idle))
             return false;
     }
     return true;
 }
 
-template<class Impl>
-bool
-DefaultDecode<Impl>::checkStall(ThreadID tid) const
-{
+template <class Impl>
+bool DefaultDecode<Impl>::checkStall(ThreadID tid) const {
     bool ret_val = false;
 
     if (stalls[tid].rename) {
-        DPRINTF(Decode,"[tid:%i] Stall fom Rename stage detected.\n", tid);
+        DPRINTF(Decode, "[tid:%i] Stall fom Rename stage detected.\n", tid);
         ret_val = true;
     }
 
     return ret_val;
 }
 
-template<class Impl>
+template <class Impl>
 inline bool
-DefaultDecode<Impl>::fetchInstsValid()
-{
+DefaultDecode<Impl>::fetchInstsValid() {
     return fromFetch->size > 0;
 }
 
-template<class Impl>
-bool
-DefaultDecode<Impl>::block(ThreadID tid)
-{
+template <class Impl>
+bool DefaultDecode<Impl>::block(ThreadID tid) {
     DPRINTF(Decode, "[tid:%i] Blocking.\n", tid);
 
     // Add the current inputs to the skid buffer so they can be
@@ -280,10 +331,8 @@ DefaultDecode<Impl>::block(ThreadID tid)
     return false;
 }
 
-template<class Impl>
-bool
-DefaultDecode<Impl>::unblock(ThreadID tid)
-{
+template <class Impl>
+bool DefaultDecode<Impl>::unblock(ThreadID tid) {
     // Decode is done unblocking only if the skid buffer is empty.
     if (skidBuffer[tid].empty()) {
         DPRINTF(Decode, "[tid:%i] Done unblocking.\n", tid);
@@ -299,12 +348,12 @@ DefaultDecode<Impl>::unblock(ThreadID tid)
     return false;
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::squash(const DynInstPtr &inst, ThreadID tid)
-{
-    DPRINTF(Decode, "[tid:%i] [sn:%llu] Squashing due to incorrect branch "
-            "prediction detected at decode.\n", tid, inst->seqNum);
+template <class Impl>
+void DefaultDecode<Impl>::squash(const DynInstPtr &inst, ThreadID tid) {
+    DPRINTF(Decode,
+            "[tid:%i] [sn:%llu] Squashing due to incorrect branch "
+            "prediction detected at decode.\n",
+            tid, inst->seqNum);
 
     // Send back mispredict information.
     toFetch->decodeInfo[tid].branchMispredict = true;
@@ -316,7 +365,7 @@ DefaultDecode<Impl>::squash(const DynInstPtr &inst, ThreadID tid)
     toFetch->decodeInfo[tid].branchTaken = inst->pcState().branching();
     toFetch->decodeInfo[tid].squashInst = inst;
     if (toFetch->decodeInfo[tid].mispredictInst->isUncondCtrl()) {
-            toFetch->decodeInfo[tid].branchTaken = true;
+        toFetch->decodeInfo[tid].branchTaken = true;
     }
 
     InstSeqNum squash_seq_num = inst->seqNum;
@@ -330,10 +379,16 @@ DefaultDecode<Impl>::squash(const DynInstPtr &inst, ThreadID tid)
     // Set status to squashing.
     decodeStatus[tid] = Squashing;
 
-    for (int i=0; i<fromFetch->size; i++) {
+    for (int i = 0; i < fromFetch->size; i++) {
         if (fromFetch->insts[i]->threadNumber == tid &&
             fromFetch->insts[i]->seqNum > squash_seq_num) {
+            int32_t squashBefore = fromFetch->insts[i]->numReplays();
+
             fromFetch->insts[i]->setSquashed();
+
+            if (fromFetch->insts[i]->numReplays() > squashBefore) {
+                ++decodeSquashSet;
+            }
         }
     }
 
@@ -351,11 +406,10 @@ DefaultDecode<Impl>::squash(const DynInstPtr &inst, ThreadID tid)
     cpu->removeInstsUntil(squash_seq_num, tid);
 }
 
-template<class Impl>
+template <class Impl>
 unsigned
-DefaultDecode<Impl>::squash(ThreadID tid)
-{
-    DPRINTF(Decode, "[tid:%i] Squashing.\n",tid);
+DefaultDecode<Impl>::squash(ThreadID tid) {
+    DPRINTF(Decode, "[tid:%i] Squashing.\n", tid);
 
     if (decodeStatus[tid] == Blocked ||
         decodeStatus[tid] == Unblocking) {
@@ -379,10 +433,16 @@ DefaultDecode<Impl>::squash(ThreadID tid)
     // Go through incoming instructions from fetch and squash them.
     unsigned squash_count = 0;
 
-    for (int i=0; i<fromFetch->size; i++) {
+    for (int i = 0; i < fromFetch->size; i++) {
         if (fromFetch->insts[i]->threadNumber == tid) {
+            int32_t squashBefore = fromFetch->insts[i]->numReplays();
+
             fromFetch->insts[i]->setSquashed();
             squash_count++;
+
+            if (fromFetch->insts[i]->numReplays() > squashBefore) {
+                ++decodeSquashSet;
+            }
         }
     }
 
@@ -399,10 +459,8 @@ DefaultDecode<Impl>::squash(ThreadID tid)
     return squash_count;
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::skidInsert(ThreadID tid)
-{
+template <class Impl>
+void DefaultDecode<Impl>::skidInsert(ThreadID tid) {
     DynInstPtr inst = NULL;
 
     while (!insts[tid].empty()) {
@@ -414,7 +472,7 @@ DefaultDecode<Impl>::skidInsert(ThreadID tid)
 
         skidBuffer[tid].push(inst);
 
-        DPRINTF(Decode,"Inserting [tid:%d][sn:%lli] PC: %s into decode skidBuffer %i\n",
+        DPRINTF(Decode, "Inserting [tid:%d][sn:%lli] PC: %s into decode skidBuffer %i\n",
                 inst->threadNumber, inst->seqNum, inst->pcState(), skidBuffer[tid].size());
     }
 
@@ -423,10 +481,8 @@ DefaultDecode<Impl>::skidInsert(ThreadID tid)
     assert(skidBuffer[tid].size() <= skidBufferMax);
 }
 
-template<class Impl>
-bool
-DefaultDecode<Impl>::skidsEmpty()
-{
+template <class Impl>
+bool DefaultDecode<Impl>::skidsEmpty() {
     list<ThreadID>::iterator threads = activeThreads->begin();
     list<ThreadID>::iterator end = activeThreads->end();
 
@@ -439,10 +495,8 @@ DefaultDecode<Impl>::skidsEmpty()
     return true;
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::updateStatus()
-{
+template <class Impl>
+void DefaultDecode<Impl>::updateStatus() {
     bool any_unblocking = false;
 
     list<ThreadID>::iterator threads = activeThreads->begin();
@@ -479,19 +533,15 @@ DefaultDecode<Impl>::updateStatus()
 }
 
 template <class Impl>
-void
-DefaultDecode<Impl>::sortInsts()
-{
+void DefaultDecode<Impl>::sortInsts() {
     int insts_from_fetch = fromFetch->size;
     for (int i = 0; i < insts_from_fetch; ++i) {
         insts[fromFetch->insts[i]->threadNumber].push(fromFetch->insts[i]);
     }
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::readStallSignals(ThreadID tid)
-{
+template <class Impl>
+void DefaultDecode<Impl>::readStallSignals(ThreadID tid) {
     if (fromRename->renameBlock[tid]) {
         stalls[tid].rename = true;
     }
@@ -503,9 +553,7 @@ DefaultDecode<Impl>::readStallSignals(ThreadID tid)
 }
 
 template <class Impl>
-bool
-DefaultDecode<Impl>::checkSignalsAndUpdate(ThreadID tid)
-{
+bool DefaultDecode<Impl>::checkSignalsAndUpdate(ThreadID tid) {
     // Check if there's a squash signal, squash if there is.
     // Check stall signals, block if necessary.
     // If status was blocked
@@ -519,9 +567,10 @@ DefaultDecode<Impl>::checkSignalsAndUpdate(ThreadID tid)
 
     // Check squash signals from commit.
     if (fromCommit->commitInfo[tid].squash) {
-
-        DPRINTF(Decode, "[tid:%i] Squashing instructions due to squash "
-                "from commit.\n", tid);
+        DPRINTF(Decode,
+                "[tid:%i] Squashing instructions due to squash "
+                "from commit.\n",
+                tid);
 
         squash(tid);
 
@@ -559,10 +608,8 @@ DefaultDecode<Impl>::checkSignalsAndUpdate(ThreadID tid)
     return false;
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::tick()
-{
+template <class Impl>
+void DefaultDecode<Impl>::tick() {
     wroteToTimeBuffer = false;
 
     bool status_change = false;
@@ -578,8 +625,8 @@ DefaultDecode<Impl>::tick()
     while (threads != end) {
         ThreadID tid = *threads++;
 
-        DPRINTF(Decode,"Processing [tid:%i]\n",tid);
-        status_change =  checkSignalsAndUpdate(tid) || status_change;
+        DPRINTF(Decode, "Processing [tid:%i]\n", tid);
+        status_change = checkSignalsAndUpdate(tid) || status_change;
 
         decode(status_change, tid);
     }
@@ -595,10 +642,8 @@ DefaultDecode<Impl>::tick()
     }
 }
 
-template<class Impl>
-void
-DefaultDecode<Impl>::decode(bool &status_change, ThreadID tid)
-{
+template <class Impl>
+void DefaultDecode<Impl>::decode(bool &status_change, ThreadID tid) {
     // If status is Running or idle,
     //     call decodeInsts()
     // If status is Unblocking,
@@ -616,8 +661,10 @@ DefaultDecode<Impl>::decode(bool &status_change, ThreadID tid)
     // will allow, as long as it is not currently blocked.
     if (decodeStatus[tid] == Running ||
         decodeStatus[tid] == Idle) {
-        DPRINTF(Decode, "[tid:%i] Not blocked, so attempting to run "
-                "stage.\n",tid);
+        DPRINTF(Decode,
+                "[tid:%i] Not blocked, so attempting to run "
+                "stage.\n",
+                tid);
 
         decodeInsts(tid);
     } else if (decodeStatus[tid] == Unblocking) {
@@ -641,33 +688,33 @@ DefaultDecode<Impl>::decode(bool &status_change, ThreadID tid)
 }
 
 template <class Impl>
-void
-DefaultDecode<Impl>::decodeInsts(ThreadID tid)
-{
+void DefaultDecode<Impl>::decodeInsts(ThreadID tid) {
     // Instructions can come either from the skid buffer or the list of
     // instructions coming from fetch, depending on decode's status.
-    int insts_available = decodeStatus[tid] == Unblocking ?
-        skidBuffer[tid].size() : insts[tid].size();
+    int insts_available = decodeStatus[tid] == Unblocking ? skidBuffer[tid].size() : insts[tid].size();
 
     if (insts_available == 0) {
-        DPRINTF(Decode, "[tid:%i] Nothing to do, breaking out"
-                " early.\n",tid);
+        DPRINTF(Decode,
+                "[tid:%i] Nothing to do, breaking out"
+                " early.\n",
+                tid);
         // Should I change the status to idle?
         ++decodeIdleCycles;
         return;
     } else if (decodeStatus[tid] == Unblocking) {
-        DPRINTF(Decode, "[tid:%i] Unblocking, removing insts from skid "
-                "buffer.\n",tid);
+        DPRINTF(Decode,
+                "[tid:%i] Unblocking, removing insts from skid "
+                "buffer.\n",
+                tid);
         ++decodeUnblockCycles;
     } else if (decodeStatus[tid] == Running) {
         ++decodeRunCycles;
     }
 
     std::queue<DynInstPtr>
-        &insts_to_decode = decodeStatus[tid] == Unblocking ?
-        skidBuffer[tid] : insts[tid];
+        &insts_to_decode = decodeStatus[tid] == Unblocking ? skidBuffer[tid] : insts[tid];
 
-    DPRINTF(Decode, "[tid:%i] Sending instruction to rename.\n",tid);
+    DPRINTF(Decode, "[tid:%i] Sending instruction to rename.\n", tid);
 
     while (insts_available > 0 && toRenameIndex < decodeWidth) {
         assert(!insts_to_decode.empty());
@@ -676,11 +723,14 @@ DefaultDecode<Impl>::decodeInsts(ThreadID tid)
 
         insts_to_decode.pop();
 
-        DPRINTF(Decode, "[tid:%i] Processing instruction [sn:%lli] with "
-                "PC %s\n", tid, inst->seqNum, inst->pcState());
+        DPRINTF(Decode,
+                "[tid:%i] Processing instruction [sn:%lli] with "
+                "PC %s\n",
+                tid, inst->seqNum, inst->pcState());
 
         if (inst->isSquashed()) {
-            DPRINTF(Decode, "[tid:%i] Instruction %i with PC %s is "
+            DPRINTF(Decode,
+                    "[tid:%i] Instruction %i with PC %s is "
                     "squashed, skipping.\n",
                     tid, inst->seqNum, inst->pcState());
 
@@ -715,6 +765,49 @@ DefaultDecode<Impl>::decodeInsts(ThreadID tid)
         }
 #endif
 
+        DSTATE(Decode, inst);
+
+        if (GCONFIG.replayDet == utils::EPOCH) {
+            if (inst->isFirstMicroop()) {
+                utils::EpochScale eScale;
+                if (IN_MAP(inst->instAddr(), epochInfo)) {
+                    eScale = epochInfo.at(inst->instAddr());
+                }
+                else if (inst->isCallInst()) {
+                    eScale = utils::ROUTINE;
+                }
+                else {
+                    eScale = utils::INVALID;
+                }
+
+                if (eScale >= GCONFIG.epochSize) {
+                    // a new epoch
+                    epochInterval.sample(_epochIntervalCnt[tid]);
+                    _epochIntervalCnt[tid] = 0;
+
+                    epochStatus[tid] += 1;
+                    inst->setEpochSeparator();
+                    inst->eScale = eScale;
+                    CSPRINT(NewEpoch, inst, "epochID: %lli\n", epochStatus[tid]);
+                }
+                _epochIntervalCnt[tid] += 1; // incretment every instruction (not uop)
+            }
+
+            inst->setEpochID(epochStatus[tid]);
+        }
+
+        // under a shadow means there are older unresolved branches (Spectre)
+        // or unretired loads, divisions or unresolved stores (Futuristic).
+        if (rob->isUnderShadow(tid) && (GCONFIG.isSpectre || GCONFIG.isFuturistic)) {
+            inst->setSpeculative();
+        } else {
+            inst->setReachedVP();
+        }
+
+        if (rob->checkShadow(inst)) {
+            rob->setUnderShadow(tid);
+        }
+
         // Ensure that if it was predicted as a branch, it really is a
         // branch.
         if (inst->readPredTaken() && !inst->isControl()) {
@@ -733,8 +826,7 @@ DefaultDecode<Impl>::decodeInsts(ThreadID tid)
         // This includes direct unconditional control and
         // direct conditional control that is predicted taken.
         if (inst->isDirectCtrl() &&
-           (inst->isUncondCtrl() || inst->readPredTaken()))
-        {
+            (inst->isUncondCtrl() || inst->readPredTaken())) {
             ++decodeBranchResolved;
 
             if (!(inst->branchTarget() == inst->readPredTarg())) {
@@ -769,4 +861,13 @@ DefaultDecode<Impl>::decodeInsts(ThreadID tid)
     }
 }
 
-#endif//__CPU_O3_DECODE_IMPL_HH__
+template <class Impl>
+void DefaultDecode<Impl>::resetEpoch(ThreadID tid, DynInstPtr inst) {
+    auto epochID = inst->isEpochSeparator() ? inst->epochID - 1 : inst->epochID;
+    if (epochID < epochStatus[tid]) {
+        epochStatus[tid] = epochID;
+        CSPRINT(ResetEpoch, inst, "epochID: %lli\n", epochStatus[tid]);
+    }
+}
+
+#endif  //__CPU_O3_DECODE_IMPL_HH__

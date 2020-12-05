@@ -1,0 +1,97 @@
+#! /usr/bin/env python3
+
+import os
+import re
+import sys
+import csv
+import math
+
+from pathlib import Path
+from typing import Iterable
+from itertools import product
+from functools import lru_cache, reduce
+from collections import defaultdict
+
+assert(os.getenv('GEM5_ROOT') and os.getenv('WORKLOADS_ROOT') and 'Missing ENV var')
+
+def calcualte_cpi(path: Path) -> float:
+    @lru_cache(50)
+    def read_cpi(stats: Path):
+        with stats.open() as f:
+            return float(re.findall(r'system.switch_cpus.cpi_total\s+(\d+\.\d+)',
+                                    f.read())[0])
+    @lru_cache(50)
+    def read_weight(weight: Path):
+        with weight.open() as f:
+            return float(f.read())
+    
+    cpi_sum = sum((read_cpi(d / 'stats.txt') * read_weight(d / 'weight')
+                   for d in path.iterdir() if Path.exists(d / 'FINISHED')))
+    weight_sum = sum((read_weight(d / 'weight')
+                      for d in path.iterdir() if Path.exists(d / 'FINISHED')))
+    return cpi_sum / weight_sum if weight_sum else math.nan
+
+
+def gmean(values: Iterable[float]) -> float:
+    values = [v for v in values if v != math.nan]
+    if len(values) == 0:
+        return math.nan
+    else:
+        return reduce(lambda x, y: x * y, values, 1.0) ** (1 / len(values))
+
+
+def main():
+    GEM5_ROOT = Path(os.getenv('GEM5_ROOT'))
+    OUTPUT_ROOT = GEM5_ROOT / 'output'
+    RUN_ROOT = Path(os.getenv('WORKLOADS_ROOT')) / 'run'
+    UNSAFE_TAG = 'Unsafe'
+
+    benchmarks = sorted([bench.name for bench in RUN_ROOT.iterdir() if bench.is_dir()],
+                        key=lambda s: s.lower())
+    configs = sorted([config.name for config in OUTPUT_ROOT.iterdir() if config.is_dir()])
+    if UNSAFE_TAG in configs:
+        configs.remove(UNSAFE_TAG)
+        configs.insert(0, UNSAFE_TAG)
+
+    results = defaultdict(lambda: defaultdict(lambda: math.nan))
+
+    for config, bench in product(configs, benchmarks):
+        results[config][bench] = calcualte_cpi(OUTPUT_ROOT / config / bench)
+
+    calc_normalized = configs[0] == UNSAFE_TAG
+    if calc_normalized:
+        normalized = [f'{c}%' for c in configs[1:]]
+        for config, norm in zip(configs[1:], normalized):
+            for bench in benchmarks:
+                results[norm][bench] = results[config][bench] / results[UNSAFE_TAG][bench]
+    else:
+        normalized = []
+    
+    data = [['App.'] + configs + normalized]
+    for bench in benchmarks:
+        line = [bench.split('_')[0]]
+        line += [f'{results[t][bench]:.2f}' for t in configs]
+        line += [f'{results[t][bench]:.1%}' for t in normalized]
+        data.append(line)
+    
+    if normalized:
+        avg = ['G. Mean'] + [' '] * len(configs)
+        for norm in normalized:
+            avg.append(f'{gmean(results[norm].values()):.1%}')
+        data.append(avg)
+
+    writer = csv.writer(sys.stdout)
+    writer.writerows(data)
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser('collect')
+    parser.add_argument('-c', '--csv', action='store_true',
+                        help='Print raw CSV output to stdout')
+    args = parser.parse_args()
+
+    if args.csv:
+        main()
+    else:
+        os.system(f'{__file__} --csv | column -t -s,')

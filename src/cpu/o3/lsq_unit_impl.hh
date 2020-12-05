@@ -241,6 +241,14 @@ LSQUnit<Impl>::regStats()
     lsqCacheBlocked
         .name(name() + ".cacheBlocked")
         .desc("Number of times an access to memory failed due to the cache being blocked");
+
+    lqSquashSet
+        .name(name() + ".LDsquashSet")
+        .desc("Number of times squash was set in Load Queue");
+
+    sqSquashSet
+        .name(name() + ".SDsquashSet")
+        .desc("Number of times squash was set in Store Queue");
 }
 
 template<class Impl>
@@ -861,8 +869,15 @@ LSQUnit<Impl>::squash(const InstSeqNum &squashed_num)
             stallingLoadIdx = 0;
         }
 
+        int32_t squashBefore = loadQueue.back().instruction()->numReplays();
+
         // Clear the smart pointer to make sure it is decremented.
         loadQueue.back().instruction()->setSquashed();
+
+        if(loadQueue.back().instruction()->numReplays() > squashBefore){
+          ++lqSquashSet;
+        }
+
         loadQueue.back().clear();
 
         --loads;
@@ -896,8 +911,14 @@ LSQUnit<Impl>::squash(const InstSeqNum &squashed_num)
             stallingStoreIsn = 0;
         }
 
+        int32_t squashBefore = storeQueue.back().instruction()->numReplays();
+
         // Clear the smart pointer to make sure it is decremented.
         storeQueue.back().instruction()->setSquashed();
+
+        if(storeQueue.back().instruction()->numReplays() > squashBefore){
+          ++sqSquashSet;
+        }
 
         // Must delete request now that it wasn't handed off to
         // memory.  This is quite ugly.  @todo: Figure out the proper

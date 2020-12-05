@@ -124,7 +124,7 @@ class DerivO3CPU(BaseCPU):
     backComSize = Param.Unsigned(5, "Time buffer size for backwards communication")
     forwardComSize = Param.Unsigned(5, "Time buffer size for forward communication")
 
-    LQEntries = Param.Unsigned(32, "Number of load queue entries")
+    LQEntries = Param.Unsigned(62, "Number of load queue entries")
     SQEntries = Param.Unsigned(32, "Number of store queue entries")
     LSQDepCheckShift = Param.Unsigned(4, "Number of places to shift addr before check")
     LSQCheckLoads = Param.Bool(True,
@@ -171,11 +171,39 @@ class DerivO3CPU(BaseCPU):
     smtROBThreshold = Param.Int(100, "SMT ROB Threshold Sharing Parameter")
     smtCommitPolicy = Param.CommitPolicy('RoundRobin', "SMT Commit Policy")
 
-    branchPred = Param.BranchPredictor(TournamentBP(numThreads =
-                                                       Parent.numThreads),
-                                       "Branch Predictor")
+    branchPred = Param.BranchPredictor(LTAGE(), "Branch Predictor")
     needsTSO = Param.Bool(buildEnv['TARGET_ISA'] == 'x86',
                           "Enable TSO Memory model")
+    maxInsts        = Param.Int(1000000000, "Max number of instructions")
+    threatModel     = Param.String("Unsafe", "Scheme of the processor")
+    HWName          = Param.String("Unsafe", "Scheme of the processor")
+    isSpectre       = Param.Bool(False, "Is Spectre safe")
+    isFuturistic    = Param.Bool(False, "Is Futuristic safe")
+    replayDetScheme = Param.String("NoDetect", "Scheme of the replay detection")
+    sbHWStruct = Param.String("Ideal", "Structure of the squash buffer")
+    maxReplays = Param.Int(0, "Max number of replays before defense")
+    maxSBSize = Param.Int(256, "Max number of squash buffer entries")
+    replayDetThreat = Param.String("Issue", "Scheme of the replay threat model")
+    CCEnable = Param.Bool(False, "Counter cache enable")
+    CCAssoc = Param.Int(4, "Counter cache associativity")
+    CCSets = Param.Int(32, "Counter cache number of sets")
+    CCMissLatency = Param.Int(8, "Counter cache miss latency")
+    CCIdeal = Param.Bool(False, "Counter cache ideal (always hit)")
+
+    liftOnClear = Param.Bool(False, 'Lift existing fences on SB clear')
+    projectedElemCnt = Param.Int(128, "Projected element count")
+
+    epochInfoPath = Param.String("", "Path to the epoch file")
+    epochSize     = Param.String("Iter", "epoch size: Iter, Loop, Rtn")
+    deleteOnRetire = Param.Bool(False, "Clear instructions from SB on retirement")
+    activeRecords = Param.Int(12, "Maximum number of active epoch records")
+    checkAllRecords = Param.Bool(False, "Check all active records to decide fence or not")
+    counterSize = Param.Int(4, "Number of bits for counter")
+
+    lowerSeqNum   = Param.Int(0, "lower bound for DSTATE")
+    upperSeqNum   = Param.Int(0, "upper bound for DSTATE")
+    hasLowerBound = Param.Bool(False, "has lower bound for DSTATE")
+    hasUpperBound = Param.Bool(False, "has upper bound for DSTATE")
 
     def addCheckerCpu(self):
         if buildEnv['TARGET_ISA'] in ['arm']:

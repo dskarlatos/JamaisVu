@@ -197,6 +197,9 @@ DefaultRename<Impl>::regStats()
         .name(name() + ".vec_pred_rename_lookups")
         .desc("Number of vector predicate rename lookups")
         .prereq(vecPredRenameLookups);
+    renameSquashSet
+        .name(name() + ".squashSet")
+        .desc("Number of times squash was set in Rename");
 }
 
 template <class Impl>
@@ -405,8 +408,15 @@ DefaultRename<Impl>::squash(const InstSeqNum &squash_seq_num, ThreadID tid)
     for (int i=0; i<fromDecode->size; i++) {
         if (fromDecode->insts[i]->threadNumber == tid &&
             fromDecode->insts[i]->seqNum > squash_seq_num) {
+
+            int32_t squashBefore = fromDecode->insts[i]->numReplays();
+
             fromDecode->insts[i]->setSquashed();
             wroteToTimeBuffer = true;
+
+            if(fromDecode->insts[i]->numReplays() > squashBefore){
+              ++renameSquashSet;
+            }
         }
 
     }

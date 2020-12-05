@@ -42,9 +42,15 @@
 #define __CPU_O3_DECODE_HH__
 
 #include <queue>
+#include <unordered_map>
 
+#include "cpu/global_utils.hh"
 #include "base/statistics.hh"
 #include "cpu/timebuf.hh"
+#include "cpu/o3/comm.hh"
+#include "cpu/o3/rob.hh"
+
+using bridge::GCONFIG;
 
 struct DerivO3CPUParams;
 
@@ -68,6 +74,10 @@ class DefaultDecode
     typedef typename CPUPol::FetchStruct FetchStruct;
     typedef typename CPUPol::DecodeStruct DecodeStruct;
     typedef typename CPUPol::TimeStruct TimeStruct;
+
+    typedef typename CPUPol::ROB  ROB;
+
+    ROB *rob;
 
   public:
     /** Overall decode stage status. Used to determine if the CPU can
@@ -95,6 +105,11 @@ class DefaultDecode
     /** Per-thread status. */
     ThreadStatus decodeStatus[Impl::MaxThreads];
 
+    InstSeqNum epochStatus[Impl::MaxThreads];
+    std::unordered_map<Addr, utils::EpochScale> epochInfo;
+
+    bool readEpochInfo();
+
   public:
     /** DefaultDecode constructor. */
     DefaultDecode(O3CPU *_cpu, DerivO3CPUParams *params);
@@ -105,6 +120,8 @@ class DefaultDecode
     void clearStates(ThreadID tid);
 
     void resetStage();
+
+    void setROB(ROB* rob) { this->rob = rob; }
 
     /** Returns the name of decode. */
     std::string name() const;
@@ -151,6 +168,8 @@ class DefaultDecode
      * correct.
      */
     void decodeInsts(ThreadID tid);
+
+    void resetEpoch(ThreadID tid, DynInstPtr inst);
 
   private:
     /** Inserts a thread's instructions into the skid buffer, to be decoded
@@ -318,6 +337,12 @@ class DefaultDecode
     Stats::Scalar decodeDecodedInsts;
     /** Stat for total number of squashed instructions. */
     Stats::Scalar decodeSquashedInsts;
+
+    // stats for MRA
+    Stats::Scalar decodeSquashSet;
+
+    Stats::Distribution epochInterval;
+    uint64_t _epochIntervalCnt[Impl::MaxThreads];
 };
 
 #endif // __CPU_O3_DECODE_HH__

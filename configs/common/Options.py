@@ -130,8 +130,8 @@ def addNoISAOptions(parser):
     parser.add_option("--l1i_size", type="string", default="32kB")
     parser.add_option("--l2_size", type="string", default="2MB")
     parser.add_option("--l3_size", type="string", default="16MB")
-    parser.add_option("--l1d_assoc", type="int", default=2)
-    parser.add_option("--l1i_assoc", type="int", default=2)
+    parser.add_option("--l1d_assoc", type="int", default=8)
+    parser.add_option("--l1i_assoc", type="int", default=4)
     parser.add_option("--l2_assoc", type="int", default=8)
     parser.add_option("--l3_assoc", type="int", default=16)
     parser.add_option("--cacheline_size", type="int", default=64)
@@ -361,6 +361,45 @@ def addCommonOptions(parser):
     parser.add_option("--arm-iset", default="arm", type="choice",
                       choices=["arm", "thumb", "aarch64"],
                       help="ARM instruction set.")
+
+    # base configs
+    parser.add_option("--needsTSO", action="store_true", help="Select TSO")
+    parser.add_option("--threatModel", default="Unsafe", type="choice", choices=["Unsafe", "Spectre", "Futuristic"], help="Threat model of the processor")
+    parser.add_option("--HWName", default="Unsafe", type="choice", choices=["Unsafe", "Fence", "Fence-All"], help="Scheme of the processor")
+    parser.add_option("--replayDetScheme", default="NoDetect", type="choice", choices=["NoDetect", "Counter", "Buffer", "Epoch"], help="Replay detection scheme")
+    parser.add_option("--replayDetThreat", default="Execute", type="choice", choices=["Issue", "Execute"], help="Replay detection threat model")
+
+    # Counter related settings
+    parser.add_option("--maxReplays", default=1, type="int", help="Specifiy number of replays before denfense is enabled")
+    parser.add_option("--CCAssoc", default=4, type="int", help="Specifiy the associativity of the counter cache")
+    parser.add_option("--CCSets", default=32, type="int", help="Specifiy the number of sets of the counter cache")
+    parser.add_option("--CCMissLatency", default=8, type="int", help="Specifiy the miss latency of the counter cache")
+    parser.add_option("--CCIdeal", action="store_true", help="Specify if the counter cache is ideal (always hit)")
+
+    # SB related settings
+    parser.add_option("--maxSBSize", default=128, type="int", help="Specifiy maximum number of squash buffer entries")
+    parser.add_option("--sbHWStruct", default="Ideal", type="choice", choices=["Ideal", "Bloom", "CountingBloom"], help="Squash Buffer structure")
+
+    # CoR: without compiler support
+    parser.add_option("--liftOnClear", action="store_true")
+    parser.add_option("--projectedElemCnt", default=128, type="int", help="Projected element count")
+    
+    # Epoch: with compiler support
+    parser.add_option("--deleteOnRetire", action="store_true", help="Clear SB on instruction retirement")
+    parser.add_option("--activeRecords", action="store", type="int", default=12, help="Maximum number of active epoch records")
+    parser.add_option("--epoch-path", type="string", action="store", help="Path to the epoch file")
+    parser.add_option("--epoch-size", type="choice", default="Iter", choices=["Iter", "Loop", "Rtn"], help="Epoch size")
+    parser.add_option("--checkAllRecords", action="store_true", help="Check all active records to decide fence or not")
+    parser.add_option("--counterSize", type="int", default=4, help="Number of bits for counter")
+
+    # simpoint
+    parser.add_option("--simpt-ckpt", action="store", default=None, type="int", help="Specify simpoint checkpoint ID")
+    parser.add_option("--benchmark", default="", action="store", type="string", help="benchmark")
+    parser.add_option("--bench-stdout", default="", action="store", type="string", help="Path to benchmark stdout")
+    parser.add_option("--bench-stderr", default="", action="store", type="string", help="Path to benchmark stderr")
+
+    parser.add_option("--dstate-start", default=0, action="store", type="int", help="minimun seqNum for invoking DPRINTF")
+    parser.add_option("--dstate-end",   default=0, action="store", type="int", help="maximum seqNum for invoking DPRINTF")
 
 
 def addSEOptions(parser):

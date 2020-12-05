@@ -56,6 +56,10 @@ if 'O3CPU' in env['CPU_MODELS']:
     Source('scoreboard.cc')
     Source('store_set.cc')
     Source('thread_context.cc')
+    Source('bitvector.cc')
+    Source('counter_vector.cc')
+    Source('counting.cc')
+    Source('hash.cc')
 
     DebugFlag('CommitRate')
     DebugFlag('IEW')

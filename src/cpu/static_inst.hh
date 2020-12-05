@@ -122,7 +122,13 @@ class StaticInst : public RefCounted, public StaticInstFlags
     int8_t _numVecPredDestRegs;
     /** @} */
 
+    // bit/counter for replays
+    int32_t _replays;
+
   public:
+    // memory violator hack
+    bool _violator = false;
+    uint64_t _violator_seqNum;
 
     /// @name Register information.
     /// The sum of numFPDestRegs(), numIntDestRegs(), numVecDestRegs(),
@@ -148,6 +154,9 @@ class StaticInst : public RefCounted, public StaticInstFlags
     /// Number of coprocesor destination regs.
     int8_t numCCDestRegs() const { return _numCCDestRegs; }
     //@}
+
+    // get functions for replays
+    int32_t numReplays() { return _replays; }
 
     /// @name Flag accessors.
     /// These functions are used to access the values of the various
@@ -203,6 +212,16 @@ class StaticInst : public RefCounted, public StaticInstFlags
     //This flag doesn't do anything yet
     bool isMicroBranch() const { return flags[IsMicroBranch]; }
     //@}
+
+    // identify if it need to fence
+    bool isReplayed() { return _replays>0 ? true : false; }
+
+    // clear/set/increment
+    int32_t clearReplays() { _replays = 0; return _replays; }
+    int32_t setReplays() { _replays = 1; return _replays; }
+    int32_t incrReplays() { _replays += 1; return _replays; }
+    int32_t decrReplays() { return _replays>0 ? _replays -= 1 :  _replays = 0; }
+
 
     void setFirstMicroop() { flags[IsFirstMicroop] = true; }
     void setLastMicroop() { flags[IsLastMicroop] = true; }
@@ -267,7 +286,7 @@ class StaticInst : public RefCounted, public StaticInstFlags
           _numFPDestRegs(0), _numIntDestRegs(0), _numCCDestRegs(0),
           _numVecDestRegs(0), _numVecElemDestRegs(0), _numVecPredDestRegs(0),
           machInst(_machInst), mnemonic(_mnemonic), cachedDisassembly(0)
-    { }
+    { _replays = 0;}
 
   public:
     virtual ~StaticInst();

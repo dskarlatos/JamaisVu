@@ -67,6 +67,9 @@ from common.FileSystemConfig import config_filesystem
 from common.Caches import *
 from common.cpu2000 import *
 
+import benchmarks
+
+
 def get_processes(options):
     """Interprets provided options and returns a list of processes"""
 
@@ -156,10 +159,23 @@ if options.bench:
             sys.exit(1)
 elif options.cmd:
     multiprocesses, numThreads = get_processes(options)
+elif options.benchmark:
+    process = getattr(benchmarks, options.benchmark, None)
+    if not process:
+        print("Unknown workload specified. Exiting!\n", file=sys.stderr)
+        sys.exit(1)
+    else:
+        multiprocesses.append(process)
+        numThreads = 1
 else:
     print("No workload specified. Exiting!\n", file=sys.stderr)
     sys.exit(1)
 
+for process in multiprocesses:
+    if options.bench_stdout:
+        process.output = options.bench_stdout
+    if options.bench_stderr:
+        process.errout = options.bench_stderr
 
 (CPUClass, test_mem_mode, FutureClass) = Simulation.setCPUClass(options)
 CPUClass.numThreads = numThreads

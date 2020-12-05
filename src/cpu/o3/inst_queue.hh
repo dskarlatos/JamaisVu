@@ -195,6 +195,10 @@ class InstructionQueue
      */
     DynInstPtr getDeferredMemInstToExecute();
 
+    DynInstPtr getFencedMemInstToExecute();
+
+    DynInstPtr getFencedInstToExecute();
+
     /** Gets a memory instruction that was blocked on the cache. NULL if none
      *  available.
      */
@@ -248,6 +252,9 @@ class InstructionQueue
      * page table walk.
      */
     void deferMemInst(const DynInstPtr &deferred_inst);
+
+    /** Fences a speculative instruction*/
+    void fenceMemInst(const DynInstPtr &fenced_inst);
 
     /**  Defers a memory instruction when it is cache blocked. */
     void blockMemInst(const DynInstPtr &blocked_inst);
@@ -319,7 +326,7 @@ class InstructionQueue
     /** List of instructions waiting for their DTB translation to
      *  complete (hw page table walk in progress).
      */
-    std::list<DynInstPtr> deferredMemInsts;
+    std::list<DynInstPtr> deferredMemInsts, fencedMemInsts, fencedInsts;
 
     /** List of instructions that have been cache blocked. */
     std::list<DynInstPtr> blockedMemInsts;
@@ -543,6 +550,11 @@ class InstructionQueue
     Stats::Scalar intAluAccesses;
     Stats::Scalar fpAluAccesses;
     Stats::Scalar vecAluAccesses;
+
+    // stats for MRA
+    Stats::Scalar iqSquashSet;
+    Stats::Scalar fencedMemEarlyLift;
+    Stats::Scalar fencedNonMemEarlyLift;
 };
 
 #endif //__CPU_O3_INST_QUEUE_HH__

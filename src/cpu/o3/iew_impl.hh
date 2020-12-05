@@ -59,8 +59,10 @@
 #include "debug/IEW.hh"
 #include "debug/O3PipeView.hh"
 #include "params/DerivO3CPU.hh"
+#include "cpu/global_utils.hh"
 
 using namespace std;
+using bridge::GCONFIG;
 
 template<class Impl>
 DefaultIEW<Impl>::DefaultIEW(O3CPU *_cpu, DerivO3CPUParams *params)
@@ -297,6 +299,10 @@ DefaultIEW<Impl>::regStats()
         .desc("insts written-back per cycle")
         .flags(total);
     wbRate = writebackCount / cpu->numCycles;
+
+    iewSquashes
+        .name(name() + ".iewSquashes")
+        .desc("Squash#");
 }
 
 template<class Impl>
@@ -1228,6 +1234,19 @@ DefaultIEW<Impl>::executeInsts()
         DPRINTF(IEW, "Execute: Executing instructions from IQ.\n");
 
         DynInstPtr inst = instQueue.getInstToExecute();
+        if (!inst) {
+            DPRINTF(IEW, "Execution reached a FENCE, stop executing new instructions\n");
+            break;
+        }
+
+        // Here we check if an instruction needs to be fenced
+        if (inst->isFenced() && !inst->isReachedVP() &&
+            inst->isSpeculative() && inst->isMemRef() &&
+            (GCONFIG.isSpectre || GCONFIG.isFuturistic) &&
+            !inst->isSquashed() && !inst->isProtectionLifted()) {
+            instQueue.fenceMemInst(inst);
+            continue;
+        }
 
         DPRINTF(IEW, "Execute: Processing PC %s, [tid:%i] [sn:%llu].\n",
                 inst->pcState(), inst->threadNumber,inst->seqNum);
@@ -1242,6 +1261,9 @@ DefaultIEW<Impl>::executeInsts()
                          " [sn:%llu]\n", inst->pcState(), inst->threadNumber,
                          inst->seqNum);
 
+            // mark instructions that were squashed before execution
+            inst->setSquashBeforeExec();
+
             // Consider this instruction executed so that commit can go
             // ahead and retire the instruction.
             inst->setExecuted();
@@ -1254,6 +1276,9 @@ DefaultIEW<Impl>::executeInsts()
 
             continue;
         }
+
+        DSTATE(Try2Execute, inst);
+        inst->setExecutionStarted();
 
         Fault fault = NoFault;
 
@@ -1276,6 +1301,7 @@ DefaultIEW<Impl>::executeInsts()
                     DPRINTF(IEW, "Execute: Delayed translation, deferring "
                             "store.\n");
                     instQueue.deferMemInst(inst);
+                    inst->resetExecutionStarted();
                     continue;
                 }
             } else if (inst->isLoad()) {
@@ -1290,6 +1316,7 @@ DefaultIEW<Impl>::executeInsts()
                     DPRINTF(IEW, "Execute: Delayed translation, deferring "
                             "load.\n");
                     instQueue.deferMemInst(inst);
+                    inst->resetExecutionStarted();
                     continue;
                 }
 
@@ -1306,6 +1333,7 @@ DefaultIEW<Impl>::executeInsts()
                     DPRINTF(IEW, "Execute: Delayed translation, deferring "
                             "store.\n");
                     instQueue.deferMemInst(inst);
+                    inst->resetExecutionStarted();
                     continue;
                 }
 
@@ -1379,6 +1407,16 @@ DefaultIEW<Impl>::executeInsts()
                 // If incorrect, then signal the ROB that it must be squashed.
                 squashDueToBranch(inst, tid);
 
+                // [squash source] inst
+                if (GCONFIG.replayDet == utils::BUFFER ||
+                    GCONFIG.replayDet == utils::EPOCH) {
+                    inst->setSquashSource();
+                    DSTATE(FoundMispred, inst);
+                    cpu->squashBuffer(tid)->squash(inst);
+                }
+
+                iewSquashes++;
+
                 ppMispredict->notify(inst);
 
                 if (inst->readPredTaken()) {
@@ -1393,6 +1431,16 @@ DefaultIEW<Impl>::executeInsts()
                 // clears the violation signal.
                 DynInstPtr violator;
                 violator = ldstQueue.getMemDepViolator(tid);
+
+                // [squash source] violator
+                if (GCONFIG.replayDet == utils::BUFFER ||
+                    GCONFIG.replayDet == utils::EPOCH) {
+                    violator->setSquashSource();
+                    violator->setPendingSelfSquash();
+                    DSTATE(FoundMemVio, inst);
+                    cpu->squashBuffer(tid)->squash(violator);
+                }
+                iewSquashes++;
 
                 DPRINTF(IEW, "LDSTQ detected a violation. Violator PC: %s "
                         "[sn:%lli], inst PC: %s [sn:%lli]. Addr is: %#x.\n",
@@ -1535,6 +1583,7 @@ DefaultIEW<Impl>::tick()
         // Have the instruction queue try to schedule any ready instructions.
         // (In actuality, this scheduling is for instructions that will
         // be executed next cycle.)
+        instQueue.getFencedInstToExecute();
         instQueue.scheduleReadyInsts();
 
         // Also should advance its own time buffers if the stage ran.

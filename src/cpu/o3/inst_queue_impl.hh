@@ -52,10 +52,12 @@
 #include "enums/OpClass.hh"
 #include "params/DerivO3CPU.hh"
 #include "sim/core.hh"
+#include "cpu/global_utils.hh"
 
 // clang complains about std::set being overloaded with Packet::set if
 // we open up the entire namespace std
 using std::list;
+using bridge::GCONFIG;
 
 template <class Impl>
 InstructionQueue<Impl>::FUCompletion::FUCompletion(const DynInstPtr &_inst,
@@ -387,6 +389,17 @@ InstructionQueue<Impl>::regStats()
         .desc("Number of vector alu accesses")
         .flags(total);
 
+    iqSquashSet
+        .name(name() + ".squashSet")
+        .desc("Number of times squash was set in Instruction Queue");
+
+    fencedMemEarlyLift
+        .name(name() + ".fencedMemEarlyLift")
+        .desc("Number of fenced mem instructions that executed earlier than VP");
+
+    fencedNonMemEarlyLift
+        .name(name() + ".fencedNonMemEarlyLift")
+        .desc("Number of fenced non-mem instructions that executed earlier than VP");
 }
 
 template <class Impl>
@@ -678,7 +691,7 @@ template <class Impl>
 typename Impl::DynInstPtr
 InstructionQueue<Impl>::getInstToExecute()
 {
-    assert(!instsToExecute.empty());
+
     DynInstPtr inst = std::move(instsToExecute.front());
     instsToExecute.pop_front();
     if (inst->isFloating()) {
@@ -780,6 +793,10 @@ InstructionQueue<Impl>::scheduleReadyInsts()
     DynInstPtr mem_inst;
     while (mem_inst = std::move(getDeferredMemInstToExecute())) {
         addReadyMemInst(mem_inst);
+    }
+
+    if (GCONFIG.hw == utils::FENCE || GCONFIG.hw == utils::FENCE_ALL) {
+        getFencedMemInstToExecute();
     }
 
     // See if any cache blocked instructions are able to be executed
@@ -1147,6 +1164,16 @@ InstructionQueue<Impl>::deferMemInst(const DynInstPtr &deferred_inst)
 
 template <class Impl>
 void
+InstructionQueue<Impl>::fenceMemInst(const DynInstPtr &fenced_inst) {
+    assert(fenced_inst->isFenced());
+    assert(!fenced_inst->isReachedVP());
+    assert(!fenced_inst->isProtectionLifted());
+    DSTATE(MemInstFenced, fenced_inst);
+    fencedMemInsts.push_back(fenced_inst);
+}
+
+template <class Impl>
+void
 InstructionQueue<Impl>::blockMemInst(const DynInstPtr &blocked_inst)
 {
     blocked_inst->clearIssued();
@@ -1173,6 +1200,50 @@ InstructionQueue<Impl>::getDeferredMemInstToExecute()
             DynInstPtr mem_inst = std::move(*it);
             deferredMemInsts.erase(it);
             return mem_inst;
+        }
+    }
+    return nullptr;
+}
+
+template <class Impl>
+typename Impl::DynInstPtr
+InstructionQueue<Impl>::getFencedMemInstToExecute() {
+    for (ListIt it = fencedMemInsts.begin(); it != fencedMemInsts.end(); ++it) {
+        if (!(*it)->isSpeculative() || (*it)->isReachedVP() ||
+            (*it)->isSquashed() || (*it)->isProtectionLifted()) {
+            DynInstPtr mem_inst = std::move(*it);
+            if (!mem_inst->isSquashed()) {
+                DSTATE(Ready2ReExec, mem_inst);
+            }
+            addReadyMemInst(mem_inst);
+            assert(mem_inst->isReachedVP() || mem_inst->isSquashed() ||
+                   mem_inst->isProtectionLifted());
+            fencedMemInsts.erase(it--);
+            if (mem_inst->isProtectionLifted()) {
+                fencedMemEarlyLift++;
+            }
+        }
+    }
+    return nullptr;
+}
+
+template <class Impl>
+typename Impl::DynInstPtr
+InstructionQueue<Impl>::getFencedInstToExecute() {
+    for (ListIt it = fencedInsts.begin(); it != fencedInsts.end(); ++it) {
+        if (!(*it)->isSpeculative() || (*it)->isReachedVP() ||
+            (*it)->isSquashed() || (*it)->isProtectionLifted()) {
+            DynInstPtr mem_inst = std::move(*it);
+            if (!mem_inst->isSquashed()) {
+                DSTATE(Ready2ReExec, mem_inst);
+            }
+            addIfReady(mem_inst);
+            assert(mem_inst->isReachedVP() || mem_inst->isSquashed() ||
+                   mem_inst->isProtectionLifted());
+            fencedInsts.erase(it--);
+            if (mem_inst->isProtectionLifted()) {
+                fencedNonMemEarlyLift++;
+            }
         }
     }
     return nullptr;
@@ -1321,8 +1392,14 @@ InstructionQueue<Impl>::doSquash(ThreadID tid)
 
             // Might want to also clear out the head of the dependency graph.
 
+            int32_t squashBefore = squashed_inst->numReplays();
+
             // Mark it as squashed within the IQ.
             squashed_inst->setSquashedInIQ();
+
+            if(squashed_inst->numReplays() > squashBefore){
+              ++iqSquashSet;
+            }
 
             // @todo: Remove this hack where several statuses are set so the
             // inst will flow through the rest of the pipeline.
@@ -1461,6 +1538,18 @@ InstructionQueue<Impl>::addIfReady(const DynInstPtr &inst)
             // its registers ready.
             memDepUnit[inst->threadNumber].regsReady(inst);
 
+            return;
+        }
+
+        if (inst->isFenced() &&
+            inst->isSpeculative() &&
+            !inst->isReachedVP() &&
+            !inst->isSquashed() &&
+            !inst->isProtectionLifted() &&
+            GCONFIG.hw == utils::FENCE_ALL &&
+            (GCONFIG.isSpectre || GCONFIG.isFuturistic)) {
+            DSTATE(StallExecution, inst);
+            fencedInsts.push_back(inst);
             return;
         }
 
