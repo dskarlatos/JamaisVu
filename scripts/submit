@@ -10,17 +10,20 @@ if [ -z $WORKLOADS_ROOT ]; then
     exit 2
 fi
 
+DRYRUN=false
+
 usage() {
-    echo "usage: submit [ -h | --help ] config_files"
+    echo "usage: submit [ -h | --help ] [ -d | --dry-run ] config_files"
     echo ""
     echo "positional arguments:"
     echo "  config_files             a list of configuration files"
     echo ""
     echo "optional arguments:"
+    echo "  -d, --dry-run            dry run without submitting"
     echo "  -h, --help               show this help message and exit"
 }
 
-PARSED_ARGUMENTS=$(getopt -a -n submit -o h --long help -- "$@")
+PARSED_ARGUMENTS=$(getopt -a -n submit -o hd --long help,dry-run -- "$@")
 
 if [ $? != 0 ]; then
     usage
@@ -33,6 +36,10 @@ do
     case "$1" in
         --)
             shift; break
+            ;;
+        -d | --dry-run)
+            echo "Dry run mode" >&2
+            DRYRUN=true; shift;
             ;;
         -h | --help)
             usage
@@ -61,9 +68,18 @@ submit_job() {
     local SCRIPT=$1
     local BENCH=$2
     local SIMPT=$3
-    local ARGS="$4 $BENCH $SIMPT"
-    local WEIGHT=$5
+    local STUDY=$4
+    local CONFIG=$5
+    local ARGS="$6 $BENCH $SIMPT $STUDY $CONFIG"
+    local WEIGHT=$7
+
+    if [ $BENCH = deepsjeng_r ] && [ $SIMPT = 0 ] && [ $CONFIG = Counter@128@1@8 ]; then
+        # skip this checkpoint because of gem5 internal decoder error
+        return
+    fi
+
     local OUTPUT=$(/bin/bash $SCRIPT $ARGS --dry-run 2>/dev/null)
+
     if [ $? != 0 ] || [ ! -d $OUTPUT ]; then
         echo "Dry run failed for $SCRIPT $ARGS" >&2
         exit 2
@@ -109,9 +125,13 @@ initialdir=$OUTPUT
 queue
 EOM
 
-    local CLUSTER_ID=$(condor_submit $JOB_FILE | egrep -oh "[0-9]+\.")
+    if [ $DRYRUN = true ]; then
+        local CLUSTER_ID="-1"
+    else
+        local CLUSTER_ID=$(condor_submit $JOB_FILE | egrep -oh "[0-9]+\.")
+    fi
     touch $OUTPUT/QUEUED
-    echo "    + Submitted $BENCH #$SIMPT with cluster ID $CLUSTER_ID"
+    echo "    + Submitted $BENCH #$SIMPT for study $STUDY with cluster ID $CLUSTER_ID"
 
     SUBMITTED=$(expr $SUBMITTED + 1)
     if [ $SUBMITTED = 50 ]; then
@@ -121,6 +141,21 @@ EOM
         sleep 10
         SUBMITTED=0
     fi
+}
+
+
+check_duplicates() {
+    local OUTPUT_ROOT=$GEM5_ROOT/output
+    local STUDY=$1
+    local CONFIG=$2
+    for OUT in $(ls -d $OUTPUT_ROOT/*/$CONFIG 2> /dev/null); do
+        if [ ! -L $OUT ] && [ $OUT != $OUTPUT_ROOT/$STUDY/$CONFIG ]; then
+            mkdir -p $OUTPUT_ROOT/$STUDY
+            ln -s $OUT $OUTPUT_ROOT/$STUDY/$CONFIG
+            return 1
+        fi
+    done
+    return 0
 }
 
 
@@ -134,18 +169,26 @@ submit() {
     echo ""
     echo ""
     echo "*** Submit jobs for configure $CONFIG ***"
+    local CONFIG_NAME=$(grep NAME $CONFIG)
+    local CONFIG_NAME=${CONFIG_NAME#*=}
     local SCRIPT=$(grep SCRIPT $CONFIG)
     local SCRIPT=$GEM5_ROOT/scripts/${SCRIPT#*=}
     local ARGS=$(grep ARGS $CONFIG)
     local ARGS=${ARGS#*=}
+    local STUDY_NAME=$(basename $(dirname $CONFIG))
 
-    for CKPT_DIR in $(ls -d $WORKLOADS_ROOT/ckpt/*/cpt.None.SIMP-*); do
-        local CKPT=$(basename $CKPT_DIR)
-        local CKPT_ID=${CKPT#*-}
-        local BENCH=$(basename $(dirname $CKPT_DIR))
-        local WEIGHT=$(grep " $CKPT_ID" $(dirname $CKPT_DIR)/results.weights | cut -d" " -f1)
-        submit_job $SCRIPT $BENCH $CKPT_ID "$ARGS" $WEIGHT
-    done
+    check_duplicates $STUDY_NAME $CONFIG_NAME
+    if [ $? = 0 ]; then
+        for CKPT_DIR in $(ls -d $WORKLOADS_ROOT/ckpt/*/cpt.None.SIMP-*); do
+            local CKPT=$(basename $CKPT_DIR)
+            local CKPT_ID=${CKPT#*-}
+            local BENCH=$(basename $(dirname $CKPT_DIR))
+            local WEIGHT=$(grep " $CKPT_ID" $(dirname $CKPT_DIR)/results.weights | cut -d" " -f1)
+            submit_job $SCRIPT $BENCH $CKPT_ID $STUDY_NAME $CONFIG_NAME "$ARGS" $WEIGHT
+        done
+    else
+        echo "  Duplicated configuration, skipped..."
+    fi
 }
 
 for CONFIG in "$@"; do

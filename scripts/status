@@ -7,17 +7,46 @@ fi
 
 OUTPUT_ROOT=$GEM5_ROOT/output
 
+QUEUED_SUM=0
+RUNNING_SUM=0
+FINISHED_SUM=0
+ERRORED_SUM=0
+
 check_status() {
-    local CONF=$1
-    local ROOT=$OUTPUT_ROOT/$CONF
+    local STUDY=$1
+    local CONF=$2
+    local ROOT=$OUTPUT_ROOT/$STUDY/$CONF
+
+    if [ -L $ROOT ]; then # it is symbolic output directory
+        return 1
+    fi
+
+    local QUEUED=$(ls $ROOT/*/*/QUEUED 2> /dev/null | wc -l)
+    local RUNNING=$(ls $ROOT/*/*/RUNNING 2> /dev/null | wc -l)
+    local FINISHED=$(ls $ROOT/*/*/FINISHED 2> /dev/null | wc -l)
+    local ERRORED=$(ls $ROOT/*/*/ERRORED 2> /dev/null | wc -l)
     echo ""
-    echo "*** $CONF ***"
-    printf "%12s: %-5d\n" "Queued #" $(ls $ROOT/*/*/QUEUED 2> /dev/null | wc -l)
-    printf "%12s: %-5d\n" "Running #" $(ls $ROOT/*/*/RUNNING 2> /dev/null | wc -l)
-    printf "%12s: %-5d\n" "Finished #" $(ls $ROOT/*/*/FINISHED 2> /dev/null | wc -l)
-    printf "%12s: %-5d\n" "Errored #" $(ls $ROOT/*/*/ERRORED 2> /dev/null | wc -l)
+    echo "*** Study: $STUDY  Config: $CONF ***"
+    printf "%12s: %-5d\n" "Queued #" $QUEUED
+    printf "%12s: %-5d\n" "Running #" $RUNNING
+    printf "%12s: %-5d\n" "Finished #" $FINISHED
+    printf "%12s: %-5d\n" "Errored #" $ERRORED
+
+    QUEUED_SUM=$(expr $QUEUED_SUM + $QUEUED)
+    RUNNING_SUM=$(expr $RUNNING_SUM + $RUNNING)
+    FINISHED_SUM=$(expr $FINISHED_SUM + $FINISHED)
+    ERRORED_SUM=$(expr $ERRORED_SUM + $ERRORED)
 }
 
-for CONF in $(ls $OUTPUT_ROOT); do
-    check_status $(basename $CONF)
+for STUDY in $(ls $OUTPUT_ROOT); do
+    for CONF in $(ls $OUTPUT_ROOT/$STUDY); do
+        check_status $STUDY $CONF
+    done
 done
+
+echo ""
+echo "=========== Summary ==========="
+printf "%12s: %-5d\n" "Queued #" $QUEUED_SUM
+printf "%12s: %-5d\n" "Running #" $RUNNING_SUM
+printf "%12s: %-5d\n" "Finished #" $FINISHED_SUM
+printf "%12s: %-5d\n" "Errored #" $ERRORED_SUM

@@ -30,11 +30,14 @@ usage() {
                 [ -i | --max-insts INST ] [ -w | --warmup-insts INST ]
                 [ --threat THREAT_MODEL ] [ --hw PROTECTION_MECHANISM ]
                 [ --lift-on-clear ] [ --SB-struct SB_STRUCTURE ] [ --dry-run ]
-                [ --no-clear ] [ -h | --help ] BENCHMARK SIMPT_ID"
+                [ --no-clear ] [ -h | --help ]
+                BENCHMARK SIMPT_ID STUDY_NAME CONFIG_NAME"
     echo ""
     echo "positional arguments:"
     echo "  BENCHMARK                name of the benchmark application"
     echo "  SIMPT_ID                 Simpoint checkpoint ID"
+    echo "  STUDY_NAME               name of the study, used for output dir"
+    echo "  CONFIG_NAME              name of the config, used for output dir"
     echo ""
     echo "optional arguments:"
     echo "  -e, --elem-cnt ELEMCNT   projected element count of bloom filter"
@@ -120,14 +123,16 @@ done
 
 BENCHMARK=$1
 SIMPT=$2
+STUDY=$3
+CONFIG=$4
 
-if [ -z $BENCHMARK ] || [ -z $SIMPT ] || [ ! -z $3 ]; then
-    echo "Error: need to provide BENCHMARK and SIMPT_ID"
+if [ -z $BENCHMARK ] || [ -z $SIMPT ] || [ -z $STUDY ] || [ -z $CONFIG ] || [ ! -z $5 ]; then
+    echo "Error: need to provide BENCHMARK, SIMPT_ID, and STUDY_NAME" >&2
     usage
     exit 2
 fi
 
-OUTPUT_DIR=$GEM5_ROOT/output/CoR/$BENCHMARK/$SIMPT
+OUTPUT_DIR=$GEM5_ROOT/output/$STUDY/$CONFIG/$BENCHMARK/$SIMPT
 RUN_DIR=$WORKLOADS_ROOT/run/$BENCHMARK
 SIMPT_DIR=$WORKLOADS_ROOT/ckpt/$BENCHMARK
 
