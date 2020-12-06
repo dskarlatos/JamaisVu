@@ -42,7 +42,7 @@ def gmean(values: Iterable[float]) -> float:
 
 def main():
     GEM5_ROOT = Path(os.getenv('GEM5_ROOT'))
-    OUTPUT_ROOT = GEM5_ROOT / 'output'
+    OUTPUT_ROOT = GEM5_ROOT / 'output' / 'perf'
     RUN_ROOT = Path(os.getenv('WORKLOADS_ROOT')) / 'run'
     UNSAFE_TAG = 'Unsafe'
 
