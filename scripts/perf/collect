@@ -5,16 +5,25 @@ import re
 import sys
 import csv
 import math
+import numpy as np
+import matplotlib.pyplot as plt
 
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, Iterable, List
 from itertools import product
 from functools import lru_cache, reduce
 from collections import defaultdict
 
 assert(os.getenv('GEM5_ROOT') and os.getenv('WORKLOADS_ROOT') and 'Missing ENV var')
 
-def calcualte_cpi(path: Path) -> float:
+GEM5_ROOT = Path(os.getenv('GEM5_ROOT'))
+STUDY_NAME = Path(__file__).resolve().parent.name
+OUTPUT_ROOT = GEM5_ROOT / 'output' / STUDY_NAME
+RUN_ROOT = Path(os.getenv('WORKLOADS_ROOT')) / 'run'
+UNSAFE_TAG = 'Unsafe'
+MEAN_TAG = 'Geo. Mean'
+
+def calculate_cpi(path: Path) -> float:
     @lru_cache(50)
     def read_cpi(stats: Path):
         with stats.open() as f:
@@ -32,7 +41,7 @@ def calcualte_cpi(path: Path) -> float:
     return cpi_sum / weight_sum if weight_sum else math.nan
 
 
-def gmean(values: Iterable[float]) -> float:
+def g_mean(values: Iterable[float]) -> float:
     values = [v for v in values if v != math.nan]
     if len(values) == 0:
         return math.nan
@@ -40,12 +49,72 @@ def gmean(values: Iterable[float]) -> float:
         return reduce(lambda x, y: x * y, values, 1.0) ** (1 / len(values))
 
 
-def main():
-    GEM5_ROOT = Path(os.getenv('GEM5_ROOT'))
-    OUTPUT_ROOT = GEM5_ROOT / 'output' / 'perf'
-    RUN_ROOT = Path(os.getenv('WORKLOADS_ROOT')) / 'run'
-    UNSAFE_TAG = 'Unsafe'
+def savefig(data: Dict[str, Dict[str, float]], normalized: List[str], prefix: str):
+    def plot(ax, data: dict, headers, size=5, width=1, MINY=.9, MAXY=3, INTERVAL=.5):
+        styles = [('gainsboro', ''), ('dimgray', ''), ('black', ''), ('silver', '///')]
+        x_center = np.arange(0, len(data) * size, size)
+        x_poss = [x_center - (width / 2) * (len(headers) - 1) + width * i for i in range(len(headers))]
+        bars = []
 
+        for idx, xs in enumerate(x_poss):
+            color, hatch = styles[idx]
+            bars.append(ax.bar(x_poss[idx], [d[idx] for d in data.values()], align='center', width=width, edgecolor='black', color=color, hatch=hatch))
+
+        ax.set_xticks(x_center)
+        ax.set_xticklabels(data.keys(), fontsize=8)
+        ax.set_xlim(-size / 2 - .5, len(data) * size - size / 2 + .5)
+
+        # rotate
+        plt.setp(ax.get_xticklabels(), rotation=30, ha='right', rotation_mode='anchor')
+
+        ax.set_ylim(MINY, MAXY)
+        ax.tick_params(axis='y')
+        ax.set_yticks(np.arange(1.0, MAXY, INTERVAL))
+        ax.set_yticklabels(['{:,.1f}'.format(x) for x in ax.get_yticks()], fontsize=8)
+        for h in ax.get_yticks():
+            ax.axhline(h, color='grey', linewidth=.5, linestyle='--')
+        ax.axhline(1, color='red', linewidth=.5)
+
+        # twinx
+        ax2 = ax.twinx()
+        ax2.set_ylim(MINY, MAXY)
+        ax2.tick_params(axis='y')
+        ax2.set_yticks(ax.get_yticks())
+        ax2.set_yticklabels(['{:,.1f}'.format(x) for x in ax.get_yticks()])
+
+        plt.legend(bars, headers, loc='upper left', prop={'size': 8}, ncol=5)
+
+    def organize(data: Dict[str, Dict[str, float]], normalized: List[str]):
+        normalized = sorted(normalized, key=lambda x: data[x][MEAN_TAG])
+        print(normalized)
+        results = dict()
+        for bench in data[normalized[0]]:
+            results[bench.split('_')[0]] = np.array([data[norm][bench] for norm in normalized])
+        
+        headers = [f'{n.split("@")[0]}' for n in normalized]
+        return results, headers
+
+    if not normalized:
+        return
+
+    plt.rc('xtick', labelsize=8)
+    plt.rc('ytick', labelsize=8)
+    fig, (ax1) = plt.subplots(1, sharex=True)
+    results, headers = organize(data, normalized)
+    plot(ax1, results, headers, MAXY=2.05, INTERVAL=.2)
+
+    norm_exec = results['parest'][2]
+    ax1.text(64, 2.1, f'{norm_exec:.2f}', rotation=45, fontsize=8)
+
+    fig.text(0.02, 0.5, 'Normalized Execution Time', va='center', rotation='vertical', fontsize=9)
+    fig = plt.gcf()
+    fig.tight_layout()
+    fig.set_size_inches(9.0, 3.0)
+    fig.savefig(prefix + '.png', dpi=100)
+    fig.savefig(prefix + '.pdf', bbox_inches='tight')
+
+
+def main():
     benchmarks = sorted([bench.name for bench in RUN_ROOT.iterdir() if bench.is_dir()],
                         key=lambda s: s.lower())
     configs = sorted([config.name for config in OUTPUT_ROOT.iterdir() if config.is_dir()])
@@ -56,10 +125,9 @@ def main():
     results = defaultdict(lambda: defaultdict(lambda: math.nan))
 
     for config, bench in product(configs, benchmarks):
-        results[config][bench] = calcualte_cpi(OUTPUT_ROOT / config / bench)
+        results[config][bench] = calculate_cpi(OUTPUT_ROOT / config / bench)
 
-    calc_normalized = configs[0] == UNSAFE_TAG
-    if calc_normalized:
+    if configs[0] == UNSAFE_TAG:
         normalized = [f'{c}%' for c in configs[1:]]
         for config, norm in zip(configs[1:], normalized):
             for bench in benchmarks:
@@ -75,13 +143,17 @@ def main():
         data.append(line)
     
     if normalized:
-        avg = ['G. Mean'] + [' '] * len(configs)
+        avg = [MEAN_TAG] + [' '] * len(configs)
         for norm in normalized:
-            avg.append(f'{gmean(results[norm].values()):.1%}')
+            g_avg = g_mean(results[norm].values())
+            avg.append(f'{g_avg:.1%}')
+            results[norm][MEAN_TAG] = g_avg
         data.append(avg)
 
     writer = csv.writer(sys.stdout)
     writer.writerows(data)
+
+    savefig(results, normalized, STUDY_NAME)
 
 if __name__ == '__main__':
     import argparse

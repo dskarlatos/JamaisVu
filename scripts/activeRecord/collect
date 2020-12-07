@@ -1,0 +1,187 @@
+#! /usr/bin/env python3
+
+import os
+import re
+import sys
+import csv
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+from pathlib import Path
+from typing import Dict, Iterable, List
+from itertools import product
+from functools import lru_cache, reduce
+from collections import defaultdict
+
+
+assert(os.getenv('GEM5_ROOT') and os.getenv('WORKLOADS_ROOT') and 'Missing ENV var')
+
+GEM5_ROOT = Path(os.getenv('GEM5_ROOT'))
+STUDY_NAME = Path(__file__).resolve().parent.name
+OUTPUT_ROOT = GEM5_ROOT / 'output' / STUDY_NAME
+RUN_ROOT = Path(os.getenv('WORKLOADS_ROOT')) / 'run'
+UNSAFE_TAG = 'Unsafe'
+MEAN_TAG = 'Avg.'
+
+def calculate_cpi(path: Path) -> float:
+    @lru_cache(50)
+    def read_stats(stats: Path):
+        with stats.open() as f:
+            data = f.read()
+            cpi = float(re.findall(r'system\.switch_cpus\.cpi_total\s+(\d+\.\d+)', data)[0])
+            try:
+                overflow = float(re.findall(r'system\.switch_cpus\.squashBuffer\.SBOverflows\s+(\d+)',
+                                        data)[0])
+                insertion = float(re.findall(r'system\.switch_cpus\.squashBuffer\.SBInserts\s+(\d+)',
+                                        data)[0])
+            except IndexError:
+                overflow, insertion = math.nan, math.nan
+            return np.array([cpi, overflow, insertion, 1])
+
+    @lru_cache(50)
+    def read_weight(weight: Path):
+        with weight.open() as f:
+            return float(f.read())
+    
+    cpi_sum, of_sum, ins_sum, w_sum = sum((read_stats(d / 'stats.txt') * read_weight(
+        d / 'weight') for d in path.iterdir() if Path.exists(d / 'FINISHED')))
+
+    return cpi_sum / w_sum if w_sum else math.nan, of_sum / ins_sum if ins_sum else math.nan
+
+
+def g_mean(values: Iterable[float]) -> float:
+    values = [v for v in values if v != math.nan]
+    if len(values) == 0:
+        return math.nan
+    else:
+        return reduce(lambda x, y: x * y, values, 1.0) ** (1 / len(values))
+
+
+def savefig(data: Dict[str, Dict[str, float]], normalized: List[str],
+            metrics: List[str], prefix: str):
+    if not normalized or not metrics:
+        return
+    X_LABEL = 'Number of {ID, PC-buffer} Pairs'
+    Y_LABEL = 'Average Normalized\nExecution Time'
+    Y2_LABEL = 'Overflow Rate'
+    MIN_Y1 = 1
+    MAX_Y1 = 1.41
+    MIN_Y2 = 0.0
+    MAX_Y2 = 0.041
+
+    schemes = sorted({n.split('@')[0] for n in normalized})
+    configs = sorted({int(n.split('@')[2]) for n in normalized})
+
+    overhead = {s: [data[f'{s}@128@{c}@4%'][MEAN_TAG] for c in configs] for s in schemes}
+    metrics = {s: [data[f'{s}@128@{c}@4@M%'][MEAN_TAG] for c in configs] for s in schemes}
+
+    colors = ['dimgray', 'gainsboro']
+
+    x_center = np.arange(0, len(configs) * 4, 4)
+    x_poss = [x_center - 0.5 + i for i in range(2)]
+
+    fig, ax = plt.subplots()
+    ax2 = ax.twinx()
+    ax.set_ylim(MIN_Y1, MAX_Y1)
+    ax2.set_ylim(MIN_Y2, MAX_Y2)
+
+    bars = []
+    fmts = ['r-', 'b-', 'g-']
+    markers = ['.', 'x', '+']
+    for idx, tag in enumerate(schemes):
+        bars.append(ax.bar(x_poss[idx], overhead[tag], align='center', width=1,
+                           edgecolor='black', color=colors[idx], label=f'{tag} exec. time'))
+
+    lines = []
+    fmts = ['r--', 'b--', 'g--']
+    markers = ['.', 'x', '+']
+    for idx, tag in enumerate(schemes):
+        lines.append(ax2.plot(x_center, metrics[tag], fmts[idx], marker=markers[idx], label=f'{tag} hit rate')[0])
+
+    ax.set_xticks(x_center)
+    ax.set_xticklabels(configs, fontsize=8)
+
+    ax.set_yticks(np.arange(MIN_Y1, MAX_Y1, .1))
+    ax.set_yticklabels(['{:,.1f}'.format(x) for x in ax.get_yticks()], fontsize=8)
+    ax2.set_yticks(np.arange(MIN_Y2, MAX_Y2, .01))
+    ax2.set_yticklabels(['{:,.0%}'.format(x) for x in ax2.get_yticks()], fontsize=8)
+
+    ax.legend(bars, [f'{o} exec. time' for o in schemes], loc="upper left", fontsize=8, bbox_to_anchor=(-0.2, 1.42))
+    ax2.legend(lines, [f'{o} overflow rate' for o in schemes], loc="upper right", fontsize=8, bbox_to_anchor=(1.2, 1.42))
+
+    ax.set_xlabel(X_LABEL, fontsize=8)
+    ax.set_ylabel(Y_LABEL, fontsize=8)
+    ax2.set_ylabel(Y2_LABEL, fontsize=8)
+
+    fig = plt.gcf()
+    fig.set_size_inches(4.0, 1.5)
+    fig.savefig(prefix + '.png', dpi=100)
+    fig.savefig(prefix + '.pdf', bbox_inches='tight')
+
+
+def main():
+    benchmarks = sorted([bench.name for bench in RUN_ROOT.iterdir() if bench.is_dir()],
+                        key=lambda s: s.lower())
+    configs = sorted([config.name for config in OUTPUT_ROOT.iterdir() if config.is_dir()])
+    if UNSAFE_TAG in configs:
+        configs.remove(UNSAFE_TAG)
+        configs.insert(0, UNSAFE_TAG)
+
+    results = defaultdict(lambda: defaultdict(lambda: math.nan))
+
+    if configs[0] == UNSAFE_TAG:
+        metrics = [c + '@M%' for c in configs[1:]]
+        for (config, tag), bench in product(zip(configs[1:], metrics), benchmarks):
+            results[config][bench], results[tag][bench] = calculate_cpi(OUTPUT_ROOT / config / bench)
+
+        for bench in benchmarks:
+            results[UNSAFE_TAG][bench], _ = calculate_cpi(OUTPUT_ROOT / UNSAFE_TAG / bench)
+
+        normalized = [f'{c}%' for c in configs[1:]]
+        for config, norm in zip(configs[1:], normalized):
+            for bench in benchmarks:
+                results[norm][bench] = results[config][bench] / results[UNSAFE_TAG][bench]
+    else:
+        normalized = []
+        metrics = []
+    
+    data = [['App.'] + configs + normalized + metrics]
+    for bench in benchmarks:
+        line = [bench.split('_')[0]]
+        line += [f'{results[t][bench]:.2f}' for t in configs]
+        line += [f'{results[t][bench]:.1%}' for t in normalized]
+        line += [f'{results[t][bench]:.1%}' for t in metrics]
+        data.append(line)
+    
+    if normalized:
+        avg = [MEAN_TAG] + [' '] * len(configs)
+        for norm in normalized:
+            g_avg = g_mean(results[norm].values())
+            avg.append(f'{g_avg:.1%}')
+            results[norm][MEAN_TAG] = g_avg
+
+        for tag in metrics:
+            m = sum(results[tag].values()) / len(list(results[tag].values()))
+            avg.append(f'{m:.1%}')
+            results[tag][MEAN_TAG] = m
+
+        data.append(avg)
+
+    writer = csv.writer(sys.stdout)
+    writer.writerows(data)
+
+    savefig(results, normalized, metrics, STUDY_NAME)
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser('collect')
+    parser.add_argument('-c', '--csv', action='store_true',
+                        help='Print raw CSV output to stdout')
+    args = parser.parse_args()
+
+    if args.csv:
+        main()
+    else:
+        os.system(f'{__file__} --csv | column -t -s,')

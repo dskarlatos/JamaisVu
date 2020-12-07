@@ -1,0 +1,148 @@
+#! /usr/bin/env python3
+
+import os
+import re
+import sys
+import csv
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+from pathlib import Path
+from typing import Dict, Iterable, List
+from itertools import product
+from functools import cmp_to_key, lru_cache, reduce
+from collections import defaultdict
+
+
+assert(os.getenv('GEM5_ROOT') and os.getenv('WORKLOADS_ROOT') and 'Missing ENV var')
+
+GEM5_ROOT = Path(os.getenv('GEM5_ROOT'))
+STUDY_NAME = Path(__file__).resolve().parent.name
+OUTPUT_ROOT = GEM5_ROOT / 'output' / STUDY_NAME
+RUN_ROOT = Path(os.getenv('WORKLOADS_ROOT')) / 'run'
+UNSAFE_TAG = 'Unsafe'
+MEAN_TAG = 'Avg.'
+
+def calculate_cpi(path: Path) -> float:
+    @lru_cache(50)
+    def read_stats(stats: Path):
+        with stats.open() as f:
+            data = f.read()
+            hits = float(re.findall(r'system.switch_cpus.fetch.fetchCCHits\s+(\d+)',
+                                    data)[0])
+            misses = float(re.findall(r'system.switch_cpus.fetch.fetchCCMisses\s+(\d+)',
+                                    data)[0])
+            return np.array([hits, misses])
+
+    @lru_cache(50)
+    def read_weight(weight: Path):
+        with weight.open() as f:
+            return float(f.read())
+    
+    hits_sum, misses_sum = sum((read_stats(d / 'stats.txt') * read_weight(
+        d / 'weight') for d in path.iterdir() if Path.exists(d / 'FINISHED')))
+    ref_sum = hits_sum + misses_sum
+    return hits_sum / ref_sum if ref_sum else math.nan
+
+
+def g_mean(values: Iterable[float]) -> float:
+    values = [v for v in values if v != math.nan]
+    if len(values) == 0:
+        return math.nan
+    else:
+        return reduce(lambda x, y: x * y, values, 1.0) ** (1 / len(values))
+
+
+def savefig(data: Dict[str, Dict[str, float]], configs: List[str], prefix: str):
+    if not configs:
+        return
+    X_LABEL = 'Counter Cache Geometry (Ways X Sets)'
+    Y_LABEL = 'Average Normalized\nExecution Time'
+    MIN_Y1 = .7
+    MAX_Y1 = 1.01
+
+    def cache_sort(x, y):
+        x_size = x[0] * x[1]
+        y_size = y[0] * y[1]
+        if x_size == y_size:
+            return 1 if x[0] > y[0] else -1
+        else:
+            return 1 if x_size > y_size else -1
+
+    schemes = sorted({n.split('@')[0] for n in configs})
+    configs = sorted({tuple(map(int, n.split('@')[1:])) for n in configs},
+                     key=cmp_to_key(cache_sort),
+                     reverse=True)
+
+    hitrates = {s: [data[f'{s}@{"@".join(map(str, c))}'][MEAN_TAG] for c in configs] for s in schemes}
+
+    x_center = np.arange(0, len(configs) * 4, 4)
+    x_poss = [x_center - 0.5 * (len(schemes) - 1) + i for i in range(len(schemes))]
+
+    fig, ax = plt.subplots()
+    ax.set_ylim(MIN_Y1, MAX_Y1)
+
+    lines = []
+    fmts = ['r--', 'b--', 'g--']
+    markers = ['.', 'x', '+']
+    for idx, tag in enumerate(schemes):
+        lines.append(ax.plot(x_poss[idx], hitrates[tag], fmts[idx], marker=markers[idx], label=f'{tag} hit rate')[0])
+
+    ax.set_xticks(x_center)
+    ax.set_xticklabels([f'{c[0]}X{c[1]}' for c in configs], fontsize=8)
+
+    ax.set_yticks(np.arange(MIN_Y1, MAX_Y1, .1))
+    ax.set_yticklabels(['{:,.0%}'.format(x) for x in ax.get_yticks()], fontsize=8)
+
+    ax.legend(lines, [f'CC hit rate' for o in schemes], loc="upper right", fontsize=8, bbox_to_anchor=(1.0, 1.04))
+
+    ax.set_xlabel(X_LABEL, fontsize=8)
+    ax.set_ylabel(Y_LABEL, fontsize=8)
+
+    fig = plt.gcf()
+    fig.set_size_inches(4.0, 1.5)
+    fig.savefig(prefix + '.png', dpi=100)
+    fig.savefig(prefix + '.pdf', bbox_inches='tight')
+
+
+def main():
+    benchmarks = sorted([bench.name for bench in RUN_ROOT.iterdir() if bench.is_dir()],
+                        key=lambda s: s.lower())
+    configs = sorted([config.name for config in OUTPUT_ROOT.iterdir() if config.is_dir()])
+    results = defaultdict(lambda: defaultdict(lambda: math.nan))
+
+    for config, bench in product(configs, benchmarks):
+        results[config][bench] = calculate_cpi(OUTPUT_ROOT / config / bench)
+    
+    data = [['App.'] + configs]
+    for bench in benchmarks:
+        line = [bench.split('_')[0]]
+        line += [f'{results[t][bench]:.2f}' for t in configs]
+        data.append(line)
+    
+    avg = [MEAN_TAG]
+    for tag in configs:
+        m = sum(results[tag].values()) / len(list(results[tag].values()))
+        avg.append(f'{m:.1%}')
+        results[tag][MEAN_TAG] = m
+
+    data.append(avg)
+
+    writer = csv.writer(sys.stdout)
+    writer.writerows(data)
+
+    savefig(results, configs, STUDY_NAME)
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser('collect')
+    parser.add_argument('-c', '--csv', action='store_true',
+                        help='Print raw CSV output to stdout')
+    args = parser.parse_args()
+
+    if args.csv:
+        main()
+    else:
+        os.system(f'{__file__} --csv | column -t -s,')
