@@ -110,7 +110,6 @@ def savefig(data: Dict[str, Dict[str, float]], normalized: List[str], prefix: st
     fig = plt.gcf()
     fig.tight_layout()
     fig.set_size_inches(9.0, 3.0)
-    fig.savefig(prefix + '.png', dpi=100)
     fig.savefig(prefix + '.pdf', bbox_inches='tight')
 
 
