@@ -7,15 +7,13 @@
 USER_ID=${LOCAL_USER_ID:-9001}
 
 echo "Starting with UID : $USER_ID"
-useradd --shell /bin/bash -u $USER_ID -d $SPEC -o -c "" -m user
+useradd --shell /bin/bash -u $USER_ID -d $GEM5_ROOT -o -c "" -m user
 cp /etc/sudoers /etc/sudoers.bak
 echo 'user  ALL=(root) NOPASSWD: ALL' >> /etc/sudoers
 
-export HOME=$SPEC
+export HOME=$GEM5_ROOT
 
-echo "Home is $HOME, SPEC is $SPEC"
+echo "Home is at $HOME, Gem5 is at $GEM5_ROOT"
 
 # copy standard configurations
-/usr/sbin/gosu user bash -c 'echo "cd $HOME && source shrc" > $HOME/.bashrc'
-exec /usr/sbin/gosu user "$@"
-
+exec env GEM5_ROOT=$GEM5_ROOT /usr/sbin/gosu user "$@"
