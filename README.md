@@ -1,6 +1,6 @@
 # Jamais Vu
 
-This repository contains a gem5 reference implementation of Jamais Vu: Thwarting Microarchitectural Replay Attacks. 
+This repository contains a gem5 reference implementation of **Jamais Vu: Thwarting Microarchitectural Replay Attacks**. 
 
 Please check our paper for details:
 
