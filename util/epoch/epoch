@@ -1,0 +1,66 @@
+#! /usr/bin/env python3
+import sys
+import r2pipe
+import logging
+
+from pathlib import Path
+from sir import Function
+from sir import WildJumpTargetError, InlinedFunctionError, UnresolvedIndirectJump
+from sir import CorruptedCFG, Radare2Error, CapstoneDecodeError
+from passes import LoopsPass, EpochPass, DominancePass, NoEntryForDomTreeError
+
+
+def epoch_analysis(filename: Path, outfile: str):
+    if not filename.exists():
+        logging.critical(f'Cannot find executable: {filename}')
+
+    r2 = r2pipe.open(str(filename))
+    logging.debug(f'Radare2 is analyzing {filename}')
+    r2.cmd('aa')
+    r2_funcs = r2.cmdj('aflj')
+
+    if outfile == '-':
+        epoch_out = sys.stdout
+    else:
+        epoch_out = open(outfile, 'w')
+
+    for r2_func in r2_funcs:
+        name, offset = r2_func["name"], r2_func["offset"]
+        try:
+            func = Function(r2, r2_func)
+            dom = DominancePass(func)
+            dom.run()
+            loop = LoopsPass(func)
+            loop.run()
+            epoch = EpochPass(func)
+            epoch.run()
+        except WildJumpTargetError:
+            logging.warning(f'Skipped {name} at {offset:#x} due to wild jumps')
+        except InlinedFunctionError:
+            logging.warning(f'Skipped {name} at {offset:#x} due to inlining')
+        except UnresolvedIndirectJump:
+            logging.warning(f'Skipped {name} at {offset:#x} due to indirect jumps')
+        except CorruptedCFG:
+            logging.warning(f'Skipped {name} at {offset:#x} due to corrupted CFG')
+        except Radare2Error:
+            logging.warning(f'Skipped {name} at {offset:#x} due to radare2 errors')
+        except NoEntryForDomTreeError:
+            logging.warning(f'Skipped {name} at {offset:#x} due to radare2 errors')
+        except CapstoneDecodeError:
+            logging.warning(f'Skipped {name} at {offset:#x} due to capstone decode errors')
+    
+    if outfile != '-':
+        epoch_out.close()
+
+
+if __name__ == "__main__":
+    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description='epoch')
+    parser.add_argument('filename', type=Path, help='path to target binary')
+    parser.add_argument('-o', '--outfile', type=str, default='-',
+                                   help='output filename, omit for stdout')
+    args = parser.parse_args()
+
+    epoch_analysis(args.filename, args.outfile)
