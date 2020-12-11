@@ -58,7 +58,7 @@ def savefig(data: Dict[str, Dict[str, float]], configs: List[str], prefix: str):
     if not configs:
         return
     X_LABEL = 'Counter Cache Geometry (Ways X Sets)'
-    Y_LABEL = 'Average Normalized\nExecution Time'
+    Y_LABEL = 'Counter Cache\nHit Rate'
     MIN_Y1 = .7
     MAX_Y1 = 1.01
 

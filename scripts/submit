@@ -78,6 +78,11 @@ submit_job() {
         return
     fi
 
+    if [ $BENCH = povray_r ] && [ $SIMPT = 3 ] && [ $CONFIG = Epoch-Loop-Rem@128@4@4 ]; then
+        # skip this checkpoint because of gem5 internal decoder error
+        return
+    fi
+
     local OUTPUT=$(/bin/bash $SCRIPT $ARGS --dry-run 2>/dev/null)
 
     if [ $? != 0 ] || [ ! -d $OUTPUT ]; then
