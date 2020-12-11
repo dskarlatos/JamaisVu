@@ -43,5 +43,6 @@ output/
 
 # data
 *.pdf
+!scripts/expectedResults/*.pdf
 *.png
 *.csv
