@@ -122,7 +122,6 @@ output=$OUTPUT/condor.out
 log=$OUTPUT/condor.log
 error=$OUTPUT/condor.err
 getenv=true
-requirements=machine=="iacoma-perf"
 request_cpus=1
 request_memory=2GB
 nice_user=true
