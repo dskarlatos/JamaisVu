@@ -43,7 +43,7 @@ Once the Docker image is built, execute
 ```bash
 docker run -it jamaisvu
 ```
-will launch a Docker container that comprises `X86_MESI_Two_Level/gem5.fast`
+to launch a Docker container that comprises `X86_MESI_Two_Level/gem5.fast`
 and required Python environment.
 
 For more advanced Docker usage, please refer to Docker's
@@ -62,3 +62,8 @@ The Epoch scheme that we proposed leverages information provided by the compiler
 The implementation of Epoch analyzer is under `util/epoch`. For more information
 about the static analyzer, please refer to this [README](util/epoch/README.md).
 
+## Acknowledgement
+We used bloom filter implementation from project [ArashPartow/bloom](https://github.com/ArashPartow/bloom)
+and counting bloom filter implementation from project [mavam/libbf](https://github.com/mavam/libbf).
+Special thanks to contributors of [ArashPartow/bloom](https://github.com/ArashPartow/bloom/graphs/contributors)
+and [mavam/libbf](https://github.com/mavam/libbf/graphs/contributors)!

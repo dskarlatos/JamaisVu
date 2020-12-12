@@ -81,7 +81,7 @@ study and configuration.
 
 ## Reproducibility
 To reproduce our results, we created 5 study directories: `perf`, `elemCnt`,
-`activeRecord`, `CBFBits`, and `CCGeometry`.
+`activeRecord`, `CBFBits`, and `CCGeometry` under `$GEM5_ROOT/scripts`.
 Each study corresponds to a figure in the evaluation section of the paper.
 
 The description of each study is as the following:
@@ -98,6 +98,18 @@ It performs a sensitivity study on the number of bits per
 counting bloom filter entry for Epoch-Iter-Rem and Epoch-Loop-Rem;
 5. `CCGeometry`: corresponds to Figure 11 in the paper.
 It performs a sensitivity study on the counter cache geometry for Counter scheme.
+
+### Benchmark Suite
+We used SPEC2017 rate benchmark suite.
+Due to simulation issue with gem5, we have to exclude 
+2 applications (cactuBSSN and imagick) out of 23 from SPEC2017.
+We use [SimPoint](http://cseweb.ucsd.edu/~calder/simpoint/)
+methodology to generate up to 10 representative intervals
+that accurately characterize end-to-end performance for each application.
+We have 155 intervals in total.
+Due to copyright issues, we won't be able to share our binaries and checkpoints.
+If you want to use your own binaries and checkpoints, please organize SPEC2017
+directory according to this [Section](#Assumptions on Workload Directory).
 
 ### Job Submission
 Before submitting jobs, please make sure environment variables
@@ -126,7 +138,7 @@ format, and create a plot named `<study name>.pdf`.
 The following command will collect results for every study
 (don't forget the **backslash and semicolon** at the end):
 ```bash
-find . -name collect -type f -print -exec {} >/dev/null \;
+find . -name collect -type f -exec {} >/dev/null \;
 ```
 
 ### Expected Results
