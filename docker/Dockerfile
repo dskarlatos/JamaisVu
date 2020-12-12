@@ -35,7 +35,7 @@ RUN pip install --upgrade pip && pip install scons && \
           /usr/local/lib/python2.7/site-packages/
 
 
-FROM gem5-env as gem5
+FROM gem5-env as jamaisvu-env
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
@@ -67,9 +67,7 @@ RUN git clone https://github.com/radareorg/radare2.git && \
     cd radare2 && git checkout 4.3.0 && \
     sudo sys/install.sh
 
-RUN pip install six
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
+RUN git clone https://github.com/dskarlatos/JamaisVu.git
 WORKDIR /home/user/JamaisVu
 RUN . /home/user/.virtualenv/asplos/bin/activate && \
     pip3 install -r scripts/requirements.txt && \
