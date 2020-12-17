@@ -3,8 +3,8 @@ This directory comprises scripts for running Jamais Vu.
 
 Before using these scripts, you need to set environment variables
 ```GEM5_ROOT=<path to gem5 root>``` and ```WORKLOADS_ROOT=<path to SPEC2017 root>```.
-Note that the workload directory must structure in a certain way to use our
-scripts. Please refer to this [Section](#Assumptions on Workload Directory)
+Note that, the workload directory must structure in a certain way to use our
+scripts. Please refer to this [Section](#Assumptions-on-Workload-Directory)
 for more information.
 
 ## Methodology
@@ -14,10 +14,9 @@ end-to-end performance. Each interval has a gem5 checkpoint that allows
 Jamais Vu to resume from.
 
 ## Assumptions on Workload Directory
-All our scripts have assumptions on how SPEC2017 directory is organized.
-We assume the SPEC2017 directory has the following structure:
+All our scripts assume the SPEC2017 directory has the following structure:
 ```
-.
+SPEC2017
 ├── ckpt  # SimPoint checkpoints
 │   ├── blender_r  # SPEC2017 application name
 │   │   ├── cpt.None.SIMP-0  # SimPoint checkpoint for interval 0
@@ -51,19 +50,19 @@ from a single SimPoint checkpoint. These four scripts correspond to *Unsafe* bas
 
 These scripts take four positional arguments: `benchmark name`, `interval ID`,
 `study name`, and `config name`. `study name` and `config name` are strings
-that indicate the study that the execution belongs to and the configuration used
+that indicate which study the execution belongs to and the configuration used
 by the execution.
 The simulation output directory will be
 ```$GEM5_ROOT/output/<study name>/<config name>/<benchmark>/<interval ID>```.
 Please refer to this [Document](https://www.gem5.org/documentation/learning_gem5/part1/gem5_stats/)
 about understanding gem5 output and stats.
 
-These four scripts take some common optional arguments, such as the total number of
+These four scripts share some common optional arguments, such as the total number of
 instructions to simulate. Each script also has some unique optional arguments,
 please refer to the help information of each script for more details.
 
 ## Submit Jobs for the Entire SPEC2017 Suite
-We also provide a script `submit`, which submits jobs to [HTCondor](https://research.cs.wisc.edu/htcondor/)
+We provide a script `submit`, which submits jobs to [HTCondor](https://research.cs.wisc.edu/htcondor/)
 for a given study and configuration, and launch execution for every SPEC2017 SimPoint checkpoint.
 
 `submit` takes as inputs a configuration file or a list of configuration files.
@@ -74,7 +73,7 @@ SCRIPT=CoR.sh       # script that runs the experiments
 ARGS=--elem-cnt 128 # optional arguments for the script
 ```
 Note that, leaving any whitespace between `=` and the `<value>` may lead to unexpected behaviors.
-The study name is implicitly assigned as the name of the directory that contains the configuration.
+Also, the study name is implicitly assigned as the name of the directory that contains the configuration.
 
 After jobs are submitted, you can use script `status` to check job status for each
 study and configuration.
@@ -109,7 +108,7 @@ that accurately characterize end-to-end performance for each application.
 We have 155 intervals in total.
 Due to copyright issues, we won't be able to share our binaries and checkpoints.
 If you want to use your own binaries and checkpoints, please organize SPEC2017
-directory according to this [Section](#Assumptions on Workload Directory).
+directory according to this [Section](#Assumptions-on-Workload-Directory).
 
 ### Job Submission
 Before submitting jobs, please make sure environment variables
@@ -133,7 +132,7 @@ You can use script `status` to print detailed jobs status information.
 ### Collect Results
 After all jobs are finished, you can collect experiment results using
 scripts named `collect` under each study directory (please make sure the required
-Python libraries are installed). The script will read stats, print stats in CSV
+[Python libraries](requirements.txt) are installed). The script will read stats, print stats in CSV
 format, and create a plot named `<study name>.pdf`.
 The following command will collect results for every study
 (don't forget the **backslash and semicolon** at the end):
