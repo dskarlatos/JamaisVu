@@ -76,6 +76,15 @@ def define_options(parser):
     parser.add_option("--numa-high-bit", type="int", default=0,
                       help="high order address bit to use for numa mapping. " \
                            "0 = highest bit, not specified = lowest bit")
+    parser.add_option("--interleaving-bits", type="int", default=0,
+                      help="number of bits to specify interleaving " \
+                           "in directory, memory controllers and caches. "
+                           "0 = not specified")
+    parser.add_option("--xor-low-bit", type="int", default=20,
+                      help="hashing bit for channel selection" \
+                           "see MemConfig for explanation of the default"\
+                           "parameter. If set to 0, xor_high_bit is also"\
+                           "set to 0.")
 
     parser.add_option("--recycle-latency", type="int", default=10,
                       help="Recycle latency for ruby controller input buffers")
@@ -86,7 +95,13 @@ def define_options(parser):
     Network.define_options(parser)
 
 def setup_memory_controllers(system, ruby, dir_cntrls, options):
-    ruby.block_size_bytes = options.cacheline_size
+    if (options.numa_high_bit):
+        block_size_bits = options.numa_high_bit + 1 - \
+                          int(math.log(options.num_dirs, 2))
+        ruby.block_size_bytes = 2 ** (block_size_bits)
+    else:
+        ruby.block_size_bytes = options.cacheline_size
+
     ruby.memory_size_bits = 48
 
     index = 0
@@ -115,15 +130,16 @@ def setup_memory_controllers(system, ruby, dir_cntrls, options):
         dir_ranges = []
         for r in system.mem_ranges:
             mem_type = ObjectList.mem_list.get(options.mem_type)
-            mem_ctrl = MemConfig.create_mem_ctrl(mem_type, r, index,
+            dram_intf = MemConfig.create_mem_intf(mem_type, r, index,
                 options.num_dirs, int(math.log(options.num_dirs, 2)),
-                intlv_size)
+                intlv_size, options.xor_low_bit)
+            mem_ctrl = m5.objects.MemCtrl(dram = dram_intf)
 
             if options.access_backing_store:
-                mem_ctrl.kvm_map=False
+                dram_intf.kvm_map=False
 
             mem_ctrls.append(mem_ctrl)
-            dir_ranges.append(mem_ctrl.range)
+            dir_ranges.append(mem_ctrl.dram.range)
 
             if crossbar != None:
                 mem_ctrl.port = crossbar.master
@@ -131,8 +147,8 @@ def setup_memory_controllers(system, ruby, dir_cntrls, options):
                 mem_ctrl.port = dir_cntrl.memory
 
             # Enable low-power DRAM states if option is set
-            if issubclass(mem_type, DRAMCtrl):
-                mem_ctrl.enable_dram_powerdown = \
+            if issubclass(mem_type, DRAMInterface):
+                mem_ctrl.dram.enable_dram_powerdown = \
                         options.enable_dram_powerdown
 
         index += 1

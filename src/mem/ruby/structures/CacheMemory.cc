@@ -1,4 +1,16 @@
 /*
+ * Copyright (c) 2020 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
  * Copyright (c) 1999-2012 Mark D. Hill and David A. Wood
  * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved.
@@ -31,6 +43,7 @@
 
 #include "base/intmath.hh"
 #include "base/logging.hh"
+#include "debug/HtmMem.hh"
 #include "debug/RubyCache.hh"
 #include "debug/RubyCacheTrace.hh"
 #include "debug/RubyResourceStalls.hh"
@@ -173,15 +186,12 @@ bool
 CacheMemory::tryCacheAccess(Addr address, RubyRequestType type,
                             DataBlock*& data_ptr)
 {
-    assert(address == makeLineAddress(address));
     DPRINTF(RubyCache, "address: %#x\n", address);
-    int64_t cacheSet = addressToCacheSet(address);
-    int loc = findTagInSet(cacheSet, address);
-    if (loc != -1) {
+    AbstractCacheEntry* entry = lookup(address);
+    if (entry != nullptr) {
         // Do we even have a tag match?
-        AbstractCacheEntry* entry = m_cache[cacheSet][loc];
-        m_replacementPolicy_ptr->touch(replacement_data[cacheSet][loc]);
-        m_cache[cacheSet][loc]->setLastAccess(curTick());
+        m_replacementPolicy_ptr->touch(entry->replacementData);
+        entry->setLastAccess(curTick());
         data_ptr = &(entry->getDataBlk());
 
         if (entry->m_Permission == AccessPermission_Read_Write) {
@@ -201,20 +211,15 @@ bool
 CacheMemory::testCacheAccess(Addr address, RubyRequestType type,
                              DataBlock*& data_ptr)
 {
-    assert(address == makeLineAddress(address));
     DPRINTF(RubyCache, "address: %#x\n", address);
-    int64_t cacheSet = addressToCacheSet(address);
-    int loc = findTagInSet(cacheSet, address);
-
-    if (loc != -1) {
+    AbstractCacheEntry* entry = lookup(address);
+    if (entry != nullptr) {
         // Do we even have a tag match?
-        AbstractCacheEntry* entry = m_cache[cacheSet][loc];
-        m_replacementPolicy_ptr->touch(replacement_data[cacheSet][loc]);
-        m_cache[cacheSet][loc]->setLastAccess(curTick());
+        m_replacementPolicy_ptr->touch(entry->replacementData);
+        entry->setLastAccess(curTick());
         data_ptr = &(entry->getDataBlk());
 
-        return m_cache[cacheSet][loc]->m_Permission !=
-            AccessPermission_NotPresent;
+        return entry->m_Permission != AccessPermission_NotPresent;
     }
 
     data_ptr = NULL;
@@ -225,11 +230,8 @@ CacheMemory::testCacheAccess(Addr address, RubyRequestType type,
 bool
 CacheMemory::isTagPresent(Addr address) const
 {
-    assert(address == makeLineAddress(address));
-    int64_t cacheSet = addressToCacheSet(address);
-    int loc = findTagInSet(cacheSet, address);
-
-    if (loc == -1) {
+    const AbstractCacheEntry* const entry = lookup(address);
+    if (entry == nullptr) {
         // We didn't find the tag
         DPRINTF(RubyCache, "No tag match for address: %#x\n", address);
         return false;
@@ -291,10 +293,13 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
             set[i]->m_locked = -1;
             m_tag_index[address] = i;
             set[i]->setPosition(cacheSet, i);
+            set[i]->replacementData = replacement_data[cacheSet][i];
+            set[i]->setLastAccess(curTick());
+
             // Call reset function here to set initial value for different
             // replacement policies.
-            m_replacementPolicy_ptr->reset(replacement_data[cacheSet][i]);
-            set[i]->setLastAccess(curTick());
+            m_replacementPolicy_ptr->reset(entry->replacementData);
+
             return entry;
         }
     }
@@ -304,17 +309,15 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry)
 void
 CacheMemory::deallocate(Addr address)
 {
-    assert(address == makeLineAddress(address));
-    assert(isTagPresent(address));
     DPRINTF(RubyCache, "address: %#x\n", address);
-    int64_t cacheSet = addressToCacheSet(address);
-    int loc = findTagInSet(cacheSet, address);
-    if (loc != -1) {
-        m_replacementPolicy_ptr->invalidate(replacement_data[cacheSet][loc]);
-        delete m_cache[cacheSet][loc];
-        m_cache[cacheSet][loc] = NULL;
-        m_tag_index.erase(address);
-    }
+    AbstractCacheEntry* entry = lookup(address);
+    assert(entry != nullptr);
+    m_replacementPolicy_ptr->invalidate(entry->replacementData);
+    uint32_t cache_set = entry->getSet();
+    uint32_t way = entry->getWay();
+    delete entry;
+    m_cache[cache_set][way] = NULL;
+    m_tag_index.erase(address);
 }
 
 // Returns with the physical address of the conflicting cache line
@@ -327,9 +330,6 @@ CacheMemory::cacheProbe(Addr address) const
     int64_t cacheSet = addressToCacheSet(address);
     std::vector<ReplaceableEntry*> candidates;
     for (int i = 0; i < m_cache_assoc; i++) {
-        // Pass the value of replacement_data to the cache entry so that we
-        // can use it in the getVictim() function.
-        m_cache[cacheSet][i]->replacementData = replacement_data[cacheSet][i];
         candidates.push_back(static_cast<ReplaceableEntry*>(
                                                        m_cache[cacheSet][i]));
     }
@@ -363,42 +363,36 @@ CacheMemory::lookup(Addr address) const
 void
 CacheMemory::setMRU(Addr address)
 {
-    int64_t cacheSet = addressToCacheSet(address);
-    int loc = findTagInSet(cacheSet, address);
-
-    if (loc != -1) {
-        m_replacementPolicy_ptr->touch(replacement_data[cacheSet][loc]);
-        m_cache[cacheSet][loc]->setLastAccess(curTick());
+    AbstractCacheEntry* entry = lookup(makeLineAddress(address));
+    if (entry != nullptr) {
+        m_replacementPolicy_ptr->touch(entry->replacementData);
+        entry->setLastAccess(curTick());
     }
 }
 
 void
-CacheMemory::setMRU(const AbstractCacheEntry *e)
+CacheMemory::setMRU(AbstractCacheEntry *entry)
 {
-    uint32_t cacheSet = e->getSet();
-    uint32_t loc = e->getWay();
-    m_replacementPolicy_ptr->touch(replacement_data[cacheSet][loc]);
-    m_cache[cacheSet][loc]->setLastAccess(curTick());
+    assert(entry != nullptr);
+    m_replacementPolicy_ptr->touch(entry->replacementData);
+    entry->setLastAccess(curTick());
 }
 
 void
 CacheMemory::setMRU(Addr address, int occupancy)
 {
-    int64_t cacheSet = addressToCacheSet(address);
-    int loc = findTagInSet(cacheSet, address);
-
-    if (loc != -1) {
+    AbstractCacheEntry* entry = lookup(makeLineAddress(address));
+    if (entry != nullptr) {
         // m_use_occupancy can decide whether we are using WeightedLRU
         // replacement policy. Depending on different replacement policies,
         // use different touch() function.
         if (m_use_occupancy) {
             static_cast<WeightedLRUPolicy*>(m_replacementPolicy_ptr)->touch(
-                replacement_data[cacheSet][loc], occupancy);
+                entry->replacementData, occupancy);
         } else {
-            m_replacementPolicy_ptr->
-                touch(replacement_data[cacheSet][loc]);
+            m_replacementPolicy_ptr->touch(entry->replacementData);
         }
-        m_cache[cacheSet][loc]->setLastAccess(curTick());
+        entry->setLastAccess(curTick());
     }
 }
 
@@ -484,34 +478,45 @@ void
 CacheMemory::setLocked(Addr address, int context)
 {
     DPRINTF(RubyCache, "Setting Lock for addr: %#x to %d\n", address, context);
-    assert(address == makeLineAddress(address));
-    int64_t cacheSet = addressToCacheSet(address);
-    int loc = findTagInSet(cacheSet, address);
-    assert(loc != -1);
-    m_cache[cacheSet][loc]->setLocked(context);
+    AbstractCacheEntry* entry = lookup(address);
+    assert(entry != nullptr);
+    entry->setLocked(context);
 }
 
 void
 CacheMemory::clearLocked(Addr address)
 {
     DPRINTF(RubyCache, "Clear Lock for addr: %#x\n", address);
-    assert(address == makeLineAddress(address));
-    int64_t cacheSet = addressToCacheSet(address);
-    int loc = findTagInSet(cacheSet, address);
-    assert(loc != -1);
-    m_cache[cacheSet][loc]->clearLocked();
+    AbstractCacheEntry* entry = lookup(address);
+    assert(entry != nullptr);
+    entry->clearLocked();
+}
+
+void
+CacheMemory::clearLockedAll(int context)
+{
+    // iterate through every set and way to get a cache line
+    for (auto i = m_cache.begin(); i != m_cache.end(); ++i) {
+        std::vector<AbstractCacheEntry*> set = *i;
+        for (auto j = set.begin(); j != set.end(); ++j) {
+            AbstractCacheEntry *line = *j;
+            if (line && line->isLocked(context)) {
+                DPRINTF(RubyCache, "Clear Lock for addr: %#x\n",
+                    line->m_Address);
+                line->clearLocked();
+            }
+        }
+    }
 }
 
 bool
 CacheMemory::isLocked(Addr address, int context)
 {
-    assert(address == makeLineAddress(address));
-    int64_t cacheSet = addressToCacheSet(address);
-    int loc = findTagInSet(cacheSet, address);
-    assert(loc != -1);
+    AbstractCacheEntry* entry = lookup(address);
+    assert(entry != nullptr);
     DPRINTF(RubyCache, "Testing Lock for addr: %#llx cur %d con %d\n",
-            address, m_cache[cacheSet][loc]->m_locked, context);
-    return m_cache[cacheSet][loc]->isLocked(context);
+            address, entry->m_locked, context);
+    return entry->isLocked(context);
 }
 
 void
@@ -603,6 +608,34 @@ CacheMemory::regStats()
         .desc("number of stalls caused by data array")
         .flags(Stats::nozero)
         ;
+
+    htmTransCommitReadSet
+        .init(8)
+        .name(name() + ".htm_transaction_committed_read_set")
+        .desc("read set size of a committed transaction")
+        .flags(Stats::pdf | Stats::dist | Stats::nozero | Stats::nonan)
+        ;
+
+    htmTransCommitWriteSet
+        .init(8)
+        .name(name() + ".htm_transaction_committed_write_set")
+        .desc("write set size of a committed transaction")
+        .flags(Stats::pdf | Stats::dist | Stats::nozero | Stats::nonan)
+        ;
+
+    htmTransAbortReadSet
+        .init(8)
+        .name(name() + ".htm_transaction_aborted_read_set")
+        .desc("read set size of a aborted transaction")
+        .flags(Stats::pdf | Stats::dist | Stats::nozero | Stats::nonan)
+        ;
+
+    htmTransAbortWriteSet
+        .init(8)
+        .name(name() + ".htm_transaction_aborted_write_set")
+        .desc("write set size of a aborted transaction")
+        .flags(Stats::pdf | Stats::dist | Stats::nozero | Stats::nonan)
+        ;
 }
 
 // assumption: SLICC generated files will only call this function
@@ -679,4 +712,70 @@ bool
 CacheMemory::isBlockNotBusy(int64_t cache_set, int64_t loc)
 {
   return (m_cache[cache_set][loc]->m_Permission != AccessPermission_Busy);
+}
+
+/* hardware transactional memory */
+
+void
+CacheMemory::htmAbortTransaction()
+{
+    uint64_t htmReadSetSize = 0;
+    uint64_t htmWriteSetSize = 0;
+
+    // iterate through every set and way to get a cache line
+    for (auto i = m_cache.begin(); i != m_cache.end(); ++i)
+    {
+        std::vector<AbstractCacheEntry*> set = *i;
+
+        for (auto j = set.begin(); j != set.end(); ++j)
+        {
+            AbstractCacheEntry *line = *j;
+
+            if (line != nullptr) {
+                htmReadSetSize += (line->getInHtmReadSet() ? 1 : 0);
+                htmWriteSetSize += (line->getInHtmWriteSet() ? 1 : 0);
+                if (line->getInHtmWriteSet()) {
+                    line->invalidateEntry();
+                }
+                line->setInHtmWriteSet(false);
+                line->setInHtmReadSet(false);
+                line->clearLocked();
+            }
+        }
+    }
+
+    htmTransAbortReadSet.sample(htmReadSetSize);
+    htmTransAbortWriteSet.sample(htmWriteSetSize);
+    DPRINTF(HtmMem, "htmAbortTransaction: read set=%u write set=%u\n",
+        htmReadSetSize, htmWriteSetSize);
+}
+
+void
+CacheMemory::htmCommitTransaction()
+{
+    uint64_t htmReadSetSize = 0;
+    uint64_t htmWriteSetSize = 0;
+
+    // iterate through every set and way to get a cache line
+    for (auto i = m_cache.begin(); i != m_cache.end(); ++i)
+    {
+        std::vector<AbstractCacheEntry*> set = *i;
+
+        for (auto j = set.begin(); j != set.end(); ++j)
+        {
+            AbstractCacheEntry *line = *j;
+            if (line != nullptr) {
+                htmReadSetSize += (line->getInHtmReadSet() ? 1 : 0);
+                htmWriteSetSize += (line->getInHtmWriteSet() ? 1 : 0);
+                line->setInHtmWriteSet(false);
+                line->setInHtmReadSet(false);
+                line->clearLocked();
+             }
+        }
+    }
+
+    htmTransCommitReadSet.sample(htmReadSetSize);
+    htmTransCommitWriteSet.sample(htmWriteSetSize);
+    DPRINTF(HtmMem, "htmCommitTransaction: read set=%u write set=%u\n",
+        htmReadSetSize, htmWriteSetSize);
 }

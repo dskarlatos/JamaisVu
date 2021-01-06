@@ -33,6 +33,7 @@
 
 #include "gpu-compute/local_memory_pipeline.hh"
 
+#include "debug/GPUMem.hh"
 #include "debug/GPUPort.hh"
 #include "gpu-compute/compute_unit.hh"
 #include "gpu-compute/gpu_dyn_inst.hh"
@@ -40,16 +41,10 @@
 #include "gpu-compute/vector_register_file.hh"
 #include "gpu-compute/wavefront.hh"
 
-LocalMemPipeline::LocalMemPipeline(const ComputeUnitParams* p) :
-    computeUnit(nullptr), lmQueueSize(p->local_mem_queue_size)
+LocalMemPipeline::LocalMemPipeline(const ComputeUnitParams* p, ComputeUnit &cu)
+    : computeUnit(cu), _name(cu.name() + ".LocalMemPipeline"),
+      lmQueueSize(p->local_mem_queue_size)
 {
-}
-
-void
-LocalMemPipeline::init(ComputeUnit *cu)
-{
-    computeUnit = cu;
-    _name = computeUnit->name() + ".LocalMemPipeline";
 }
 
 void
@@ -62,41 +57,49 @@ LocalMemPipeline::exec()
     bool accessVrf = true;
     Wavefront *w = nullptr;
 
-    if ((m) && (m->isLoad() || m->isAtomicRet())) {
+    if ((m) && m->latency.rdy() && (m->isLoad() || m->isAtomicRet())) {
         w = m->wavefront();
 
-        accessVrf =
-            w->computeUnit->vrf[w->simdId]->
-            vrfOperandAccessReady(m->seqNum(), w, m,
-                                  VrfAccessType::WRITE);
+        accessVrf = w->computeUnit->vrf[w->simdId]->
+            canScheduleWriteOperandsFromLoad(w, m);
+
     }
 
     if (!lmReturnedRequests.empty() && m->latency.rdy() && accessVrf &&
-        computeUnit->locMemToVrfBus.rdy() && (computeUnit->shader->coissue_return
-                 || computeUnit->wfWait.at(m->pipeId).rdy())) {
+        computeUnit.locMemToVrfBus.rdy()
+        && (computeUnit.shader->coissue_return
+        || computeUnit.vectorSharedMemUnit.rdy())) {
 
         lmReturnedRequests.pop();
         w = m->wavefront();
 
+        DPRINTF(GPUMem, "CU%d: WF[%d][%d]: Completing local mem instr %s\n",
+                m->cu_id, m->simdId, m->wfSlotId, m->disassemble());
         m->completeAcc(m);
+        w->decLGKMInstsIssued();
+
+        if (m->isLoad() || m->isAtomicRet()) {
+            w->computeUnit->vrf[w->simdId]->
+                scheduleWriteOperandsFromLoad(w, m);
+        }
 
         // Decrement outstanding request count
-        computeUnit->shader->ScheduleAdd(&w->outstandingReqs, m->time, -1);
+        computeUnit.shader->ScheduleAdd(&w->outstandingReqs, m->time, -1);
 
         if (m->isStore() || m->isAtomic()) {
-            computeUnit->shader->ScheduleAdd(&w->outstandingReqsWrLm,
+            computeUnit.shader->ScheduleAdd(&w->outstandingReqsWrLm,
                                              m->time, -1);
         }
 
         if (m->isLoad() || m->isAtomic()) {
-            computeUnit->shader->ScheduleAdd(&w->outstandingReqsRdLm,
+            computeUnit.shader->ScheduleAdd(&w->outstandingReqsRdLm,
                                              m->time, -1);
         }
 
         // Mark write bus busy for appropriate amount of time
-        computeUnit->locMemToVrfBus.set(m->time);
-        if (computeUnit->shader->coissue_return == 0)
-            w->computeUnit->wfWait.at(m->pipeId).set(m->time);
+        computeUnit.locMemToVrfBus.set(m->time);
+        if (computeUnit.shader->coissue_return == 0)
+            w->computeUnit->vectorSharedMemUnit.set(m->time);
     }
 
     // If pipeline has executed a local memory instruction
@@ -106,12 +109,19 @@ LocalMemPipeline::exec()
 
         GPUDynInstPtr m = lmIssuedRequests.front();
 
-        bool returnVal = computeUnit->sendToLds(m);
+        bool returnVal = computeUnit.sendToLds(m);
         if (!returnVal) {
             DPRINTF(GPUPort, "packet was nack'd and put in retry queue");
         }
         lmIssuedRequests.pop();
     }
+}
+
+void
+LocalMemPipeline::issueRequest(GPUDynInstPtr gpuDynInst)
+{
+    gpuDynInst->setAccessTime(curTick());
+    lmIssuedRequests.push(gpuDynInst);
 }
 
 void

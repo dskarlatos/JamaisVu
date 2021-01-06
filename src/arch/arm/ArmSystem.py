@@ -75,13 +75,12 @@ class ArmSystem(System):
         "True if LSE is implemented (ARMv8.1)")
     have_pan = Param.Bool(True,
         "True if Priviledge Access Never is implemented (ARMv8.1)")
-
+    have_secel2 = Param.Bool(True,
+        "True if Secure EL2 is implemented (ARMv8)")
+    have_tme = Param.Bool(False,
+        "True if transactional memory extension (TME) is implemented")
     semihosting = Param.ArmSemihosting(NULL,
         "Enable support for the Arm semihosting by settings this parameter")
-
-    m5ops_base = Param.Addr(0,
-        "Base of the 64KiB PA range used for memory-mapped m5ops. Set to 0 "
-        "to disable.")
 
     # Set to true if simulation provides a PSCI implementation
     # This flag will be checked when auto-generating

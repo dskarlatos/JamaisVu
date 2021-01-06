@@ -114,6 +114,13 @@ class ExecContext : public ::ExecContext
     }
 
     Fault
+    initiateHtmCmd(Request::Flags flags) override
+    {
+        panic("ExecContext::initiateHtmCmd() not implemented on MinorCPU\n");
+        return NoFault;
+    }
+
+    Fault
     writeMem(uint8_t *data, unsigned int size, Addr addr,
              Request::Flags flags, uint64_t *res,
              const std::vector<bool>& byte_enable = std::vector<bool>())
@@ -333,6 +340,39 @@ class ExecContext : public ::ExecContext
         thread.setMemAccPredicate(val);
     }
 
+    // hardware transactional memory
+    uint64_t
+    getHtmTransactionUid() const override
+    {
+        panic("ExecContext::getHtmTransactionUid() not"
+              "implemented on MinorCPU\n");
+        return 0;
+    }
+
+    uint64_t
+    newHtmTransactionUid() const override
+    {
+        panic("ExecContext::newHtmTransactionUid() not"
+              "implemented on MinorCPU\n");
+        return 0;
+    }
+
+    bool
+    inHtmTransactionalState() const override
+    {
+        // ExecContext::inHtmTransactionalState() not
+        // implemented on MinorCPU
+        return false;
+    }
+
+    uint64_t
+    getHtmTransactionalDepth() const override
+    {
+        panic("ExecContext::getHtmTransactionalDepth() not"
+              "implemented on MinorCPU\n");
+        return 0;
+    }
+
     TheISA::PCState
     pcState() const override
     {
@@ -379,11 +419,7 @@ class ExecContext : public ::ExecContext
         return thread.setMiscReg(reg.index(), val);
     }
 
-    void
-    syscall(Fault *fault) override
-    {
-        thread.syscall(fault);
-    }
+    void syscall() override { thread.syscall(); }
 
     ThreadContext *tcBase() const override { return thread.getTC(); }
 

@@ -112,18 +112,18 @@ class CommMonitor : public SimObject
     };
 
     /**
-     * This is the master port of the communication monitor. All recv
+     * This is the request port of the communication monitor. All recv
      * functions call a function in CommMonitor, where the
-     * send function of the slave port is called. Besides this, these
+     * send function of the CPU-side port is called. Besides this, these
      * functions can also perform actions for capturing statistics.
      */
-    class MonitorMasterPort : public MasterPort
+    class MonitorRequestPort : public RequestPort
     {
 
       public:
 
-        MonitorMasterPort(const std::string& _name, CommMonitor& _mon)
-            : MasterPort(_name, &_mon), mon(_mon)
+        MonitorRequestPort(const std::string& _name, CommMonitor& _mon)
+            : RequestPort(_name, &_mon), mon(_mon)
         { }
 
       protected:
@@ -174,22 +174,22 @@ class CommMonitor : public SimObject
 
     };
 
-    /** Instance of master port, facing the memory side */
-    MonitorMasterPort masterPort;
+    /** Instance of request port, facing the memory side */
+    MonitorRequestPort memSidePort;
 
     /**
-     * This is the slave port of the communication monitor. All recv
+     * This is the CPU-side port of the communication monitor. All recv
      * functions call a function in CommMonitor, where the
-     * send function of the master port is called. Besides this, these
+     * send function of the request port is called. Besides this, these
      * functions can also perform actions for capturing statistics.
      */
-    class MonitorSlavePort : public SlavePort
+    class MonitorResponsePort : public ResponsePort
     {
 
       public:
 
-        MonitorSlavePort(const std::string& _name, CommMonitor& _mon)
-            : SlavePort(_name, &_mon), mon(_mon)
+        MonitorResponsePort(const std::string& _name, CommMonitor& _mon)
+            : ResponsePort(_name, &_mon), mon(_mon)
         { }
 
       protected:
@@ -235,8 +235,8 @@ class CommMonitor : public SimObject
 
     };
 
-    /** Instance of slave port, i.e. on the CPU side */
-    MonitorSlavePort slavePort;
+    /** Instance of response port, i.e. on the CPU side */
+    MonitorResponsePort cpuSidePort;
 
     void recvFunctional(PacketPtr pkt);
 

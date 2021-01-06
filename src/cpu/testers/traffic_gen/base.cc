@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013, 2016-2019 ARM Limited
+ * Copyright (c) 2012-2013, 2016-2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -45,8 +45,10 @@
 #include "cpu/testers/traffic_gen/dram_gen.hh"
 #include "cpu/testers/traffic_gen/dram_rot_gen.hh"
 #include "cpu/testers/traffic_gen/exit_gen.hh"
+#include "cpu/testers/traffic_gen/hybrid_gen.hh"
 #include "cpu/testers/traffic_gen/idle_gen.hh"
 #include "cpu/testers/traffic_gen/linear_gen.hh"
+#include "cpu/testers/traffic_gen/nvm_gen.hh"
 #include "cpu/testers/traffic_gen/random_gen.hh"
 #include "cpu/testers/traffic_gen/stream_gen.hh"
 #include "debug/Checkpoint.hh"
@@ -78,7 +80,7 @@ BaseTrafficGen::BaseTrafficGen(const BaseTrafficGenParams* p)
       retryPktTick(0), blockedWaitingResp(false),
       updateEvent([this]{ update(); }, name()),
       stats(this),
-      masterID(system->getMasterId(this)),
+      requestorId(system->getRequestorId(this)),
       streamGenerator(StreamGen::create(p))
 {
 }
@@ -356,13 +358,15 @@ BaseTrafficGen::StatGroup::StatGroup(Stats::Group *parent)
 std::shared_ptr<BaseGen>
 BaseTrafficGen::createIdle(Tick duration)
 {
-    return std::shared_ptr<BaseGen>(new IdleGen(*this, masterID, duration));
+    return std::shared_ptr<BaseGen>(new IdleGen(*this, requestorId,
+                                                duration));
 }
 
 std::shared_ptr<BaseGen>
 BaseTrafficGen::createExit(Tick duration)
 {
-    return std::shared_ptr<BaseGen>(new ExitGen(*this, masterID, duration));
+    return std::shared_ptr<BaseGen>(new ExitGen(*this, requestorId,
+                                                duration));
 }
 
 std::shared_ptr<BaseGen>
@@ -371,7 +375,7 @@ BaseTrafficGen::createLinear(Tick duration,
                              Tick min_period, Tick max_period,
                              uint8_t read_percent, Addr data_limit)
 {
-    return std::shared_ptr<BaseGen>(new LinearGen(*this, masterID,
+    return std::shared_ptr<BaseGen>(new LinearGen(*this, requestorId,
                                                   duration, start_addr,
                                                   end_addr, blocksize,
                                                   system->cacheLineSize(),
@@ -385,7 +389,7 @@ BaseTrafficGen::createRandom(Tick duration,
                              Tick min_period, Tick max_period,
                              uint8_t read_percent, Addr data_limit)
 {
-    return std::shared_ptr<BaseGen>(new RandomGen(*this, masterID,
+    return std::shared_ptr<BaseGen>(new RandomGen(*this, requestorId,
                                                   duration, start_addr,
                                                   end_addr, blocksize,
                                                   system->cacheLineSize(),
@@ -399,19 +403,19 @@ BaseTrafficGen::createDram(Tick duration,
                            Tick min_period, Tick max_period,
                            uint8_t read_percent, Addr data_limit,
                            unsigned int num_seq_pkts, unsigned int page_size,
-                           unsigned int nbr_of_banks_DRAM,
+                           unsigned int nbr_of_banks,
                            unsigned int nbr_of_banks_util,
                            Enums::AddrMap addr_mapping,
                            unsigned int nbr_of_ranks)
 {
-    return std::shared_ptr<BaseGen>(new DramGen(*this, masterID,
+    return std::shared_ptr<BaseGen>(new DramGen(*this, requestorId,
                                                 duration, start_addr,
                                                 end_addr, blocksize,
                                                 system->cacheLineSize(),
                                                 min_period, max_period,
                                                 read_percent, data_limit,
                                                 num_seq_pkts, page_size,
-                                                nbr_of_banks_DRAM,
+                                                nbr_of_banks,
                                                 nbr_of_banks_util,
                                                 addr_mapping,
                                                 nbr_of_ranks));
@@ -424,24 +428,91 @@ BaseTrafficGen::createDramRot(Tick duration,
                               uint8_t read_percent, Addr data_limit,
                               unsigned int num_seq_pkts,
                               unsigned int page_size,
-                              unsigned int nbr_of_banks_DRAM,
+                              unsigned int nbr_of_banks,
                               unsigned int nbr_of_banks_util,
                               Enums::AddrMap addr_mapping,
                               unsigned int nbr_of_ranks,
                               unsigned int max_seq_count_per_rank)
 {
-    return std::shared_ptr<BaseGen>(new DramRotGen(*this, masterID,
+    return std::shared_ptr<BaseGen>(new DramRotGen(*this, requestorId,
                                                    duration, start_addr,
                                                    end_addr, blocksize,
                                                    system->cacheLineSize(),
                                                    min_period, max_period,
                                                    read_percent, data_limit,
                                                    num_seq_pkts, page_size,
-                                                   nbr_of_banks_DRAM,
+                                                   nbr_of_banks,
                                                    nbr_of_banks_util,
                                                    addr_mapping,
                                                    nbr_of_ranks,
                                                    max_seq_count_per_rank));
+}
+
+std::shared_ptr<BaseGen>
+BaseTrafficGen::createHybrid(Tick duration,
+                           Addr start_addr_dram, Addr end_addr_dram,
+                           Addr blocksize_dram,
+                           Addr start_addr_nvm, Addr end_addr_nvm,
+                           Addr blocksize_nvm,
+                           Tick min_period, Tick max_period,
+                           uint8_t read_percent, Addr data_limit,
+                           unsigned int num_seq_pkts_dram,
+                           unsigned int page_size_dram,
+                           unsigned int nbr_of_banks_dram,
+                           unsigned int nbr_of_banks_util_dram,
+                           unsigned int num_seq_pkts_nvm,
+                           unsigned int buffer_size_nvm,
+                           unsigned int nbr_of_banks_nvm,
+                           unsigned int nbr_of_banks_util_nvm,
+                           Enums::AddrMap addr_mapping,
+                           unsigned int nbr_of_ranks_dram,
+                           unsigned int nbr_of_ranks_nvm,
+                           uint8_t nvm_percent)
+{
+    return std::shared_ptr<BaseGen>(new HybridGen(*this, requestorId,
+                                                duration, start_addr_dram,
+                                                end_addr_dram, blocksize_dram,
+                                                start_addr_nvm,
+                                                end_addr_nvm, blocksize_nvm,
+                                                system->cacheLineSize(),
+                                                min_period, max_period,
+                                                read_percent, data_limit,
+                                                num_seq_pkts_dram,
+                                                page_size_dram,
+                                                nbr_of_banks_dram,
+                                                nbr_of_banks_util_dram,
+                                                num_seq_pkts_nvm,
+                                                buffer_size_nvm,
+                                                nbr_of_banks_nvm,
+                                                nbr_of_banks_util_nvm,
+                                                addr_mapping,
+                                                nbr_of_ranks_dram,
+                                                nbr_of_ranks_nvm,
+                                                nvm_percent));
+}
+
+std::shared_ptr<BaseGen>
+BaseTrafficGen::createNvm(Tick duration,
+                           Addr start_addr, Addr end_addr, Addr blocksize,
+                           Tick min_period, Tick max_period,
+                           uint8_t read_percent, Addr data_limit,
+                           unsigned int num_seq_pkts, unsigned int buffer_size,
+                           unsigned int nbr_of_banks,
+                           unsigned int nbr_of_banks_util,
+                           Enums::AddrMap addr_mapping,
+                           unsigned int nbr_of_ranks)
+{
+    return std::shared_ptr<BaseGen>(new NvmGen(*this, requestorId,
+                                                duration, start_addr,
+                                                end_addr, blocksize,
+                                                system->cacheLineSize(),
+                                                min_period, max_period,
+                                                read_percent, data_limit,
+                                                num_seq_pkts, buffer_size,
+                                                nbr_of_banks,
+                                                nbr_of_banks_util,
+                                                addr_mapping,
+                                                nbr_of_ranks));
 }
 
 std::shared_ptr<BaseGen>
@@ -450,7 +521,7 @@ BaseTrafficGen::createTrace(Tick duration,
 {
 #if HAVE_PROTOBUF
     return std::shared_ptr<BaseGen>(
-        new TraceGen(*this, masterID, duration, trace_file, addr_offset));
+        new TraceGen(*this, requestorId, duration, trace_file, addr_offset));
 #else
     panic("Can't instantiate trace generation without Protobuf support!\n");
 #endif

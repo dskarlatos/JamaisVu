@@ -47,6 +47,7 @@
 #include "mem/page_table.hh"
 #include "sim/byteswap.hh"
 #include "sim/process.hh"
+#include "sim/proxy_ptr.hh"
 #include "sim/sim_exit.hh"
 #include "sim/syscall_debug_macros.hh"
 #include "sim/syscall_desc.hh"
@@ -119,9 +120,9 @@ exitImpl(SyscallDesc *desc, ThreadContext *tc, bool group, int status)
 
     bool last_thread = true;
     Process *parent = nullptr, *tg_lead = nullptr;
-    for (int i = 0; last_thread && i < sys->numContexts(); i++) {
+    for (int i = 0; last_thread && i < sys->threads.size(); i++) {
         Process *walk;
-        if (!(walk = sys->threadContexts[i]->getProcessPtr()))
+        if (!(walk = sys->threads[i]->getProcessPtr()))
             continue;
 
         /**
@@ -133,8 +134,9 @@ exitImpl(SyscallDesc *desc, ThreadContext *tc, bool group, int status)
         if (walk->pid() == p->tgid())
             tg_lead = walk;
 
-        if ((sys->threadContexts[i]->status() != ThreadContext::Halted) &&
-            (sys->threadContexts[i]->status() != ThreadContext::Halting) &&
+        auto *tc = sys->threads[i];
+        if ((tc->status() != ThreadContext::Halted) &&
+            (tc->status() != ThreadContext::Halting) &&
             (walk != p)) {
             /**
              * Check if we share thread group with the pointer; this denotes
@@ -156,7 +158,7 @@ exitImpl(SyscallDesc *desc, ThreadContext *tc, bool group, int status)
                  * all threads in the group.
                  */
                 if (*(p->exitGroup)) {
-                    sys->threadContexts[i]->halt();
+                    tc->halt();
                 } else {
                     last_thread = false;
                 }
@@ -201,7 +203,7 @@ exitImpl(SyscallDesc *desc, ThreadContext *tc, bool group, int status)
      */
     int activeContexts = 0;
     for (auto &system: sys->systemList)
-        activeContexts += system->numRunningContexts();
+        activeContexts += system->threads.numRunning();
 
     if (activeContexts == 0) {
         /**
@@ -239,7 +241,7 @@ exitGroupFunc(SyscallDesc *desc, ThreadContext *tc, int status)
 SyscallReturn
 getpagesizeFunc(SyscallDesc *desc, ThreadContext *tc)
 {
-    return (int)PageBytes;
+    return (int)tc->getSystemPtr()->getPageBytes();
 }
 
 
@@ -905,9 +907,9 @@ setpgidFunc(SyscallDesc *desc, ThreadContext *tc, int pid, int pgid)
     System *sysh = tc->getSystemPtr();
 
     // Retrieves process pointer from active/suspended thread contexts.
-    for (int i = 0; i < sysh->numContexts(); i++) {
-        if (sysh->threadContexts[i]->status() != ThreadContext::Halted) {
-            Process *temp_h = sysh->threadContexts[i]->getProcessPtr();
+    for (auto *tc: sysh->threads) {
+        if (tc->status() != ThreadContext::Halted) {
+            Process *temp_h = tc->getProcessPtr();
             Process *walk_ph = (Process*)temp_h;
 
             if (walk_ph && walk_ph->pid() == process->pid())
@@ -1633,3 +1635,17 @@ setsockoptFunc(SyscallDesc *desc, ThreadContext *tc,
     return (status == -1) ? -errno : status;
 }
 
+SyscallReturn
+getcpuFunc(SyscallDesc *desc, ThreadContext *tc,
+           VPtr<uint32_t> cpu, VPtr<uint32_t> node, VPtr<uint32_t> tcache)
+{
+    // unsigned is the same size (4) on all Linux supported ISAs.
+    if (cpu)
+        *cpu = htog(tc->contextId(), tc->getSystemPtr()->getGuestByteOrder());
+
+    // Set a fixed NUMA node 0.
+    if (node)
+        *node = 0;
+
+    return 0;
+}

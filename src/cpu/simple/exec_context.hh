@@ -473,6 +473,11 @@ class SimpleExecContext : public ExecContext {
         return cpu->initiateMemAMO(addr, size, flags, std::move(amo_op));
     }
 
+    Fault initiateHtmCmd(Request::Flags flags) override
+    {
+        return cpu->initiateHtmCmd(flags);
+    }
+
     /**
      * Sets the number of consecutive store conditional failures.
      */
@@ -494,11 +499,7 @@ class SimpleExecContext : public ExecContext {
     /**
      * Executes a syscall specified by the callnum.
      */
-    void
-    syscall(Fault *fault) override
-    {
-        thread->syscall(fault);
-    }
+    void syscall() override { thread->syscall(); }
 
     /** Returns a pointer to the ThreadContext. */
     ThreadContext *tcBase() const override { return thread->getTC(); }
@@ -529,6 +530,31 @@ class SimpleExecContext : public ExecContext {
     setMemAccPredicate(bool val) override
     {
         thread->setMemAccPredicate(val);
+    }
+
+    uint64_t
+    getHtmTransactionUid() const override
+    {
+        return tcBase()->getHtmCheckpointPtr()->getHtmUid();
+    }
+
+    uint64_t
+    newHtmTransactionUid() const override
+    {
+        return tcBase()->getHtmCheckpointPtr()->newHtmUid();
+    }
+
+    bool
+    inHtmTransactionalState() const override
+    {
+        return (getHtmTransactionalDepth() > 0);
+    }
+
+    uint64_t
+    getHtmTransactionalDepth() const override
+    {
+        assert(thread->htmTransactionStarts >= thread->htmTransactionStops);
+        return (thread->htmTransactionStarts - thread->htmTransactionStops);
     }
 
     /**

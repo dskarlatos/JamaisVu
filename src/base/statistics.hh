@@ -82,8 +82,6 @@
 #include "base/str.hh"
 #include "base/types.hh"
 
-class Callback;
-
 /** The current simulated tick. */
 extern Tick curTick();
 
@@ -793,7 +791,7 @@ class ValueProxy : public ProxyInfo
     Result total() const { return *scalar; }
 };
 
-template <class T>
+template <class T, class Enabled=void>
 class FunctorProxy : public ProxyInfo
 {
   private:
@@ -804,6 +802,27 @@ class FunctorProxy : public ProxyInfo
     Counter value() const { return (*functor)(); }
     Result result() const { return (*functor)(); }
     Result total() const { return (*functor)(); }
+};
+
+/**
+ * Template specialization for type std::function<Result()> which holds a copy
+ * of its target instead of a pointer to it. This makes it possible to use a
+ * lambda or other type inline without having to keep track of an instance
+ * somewhere else.
+ */
+template <class T>
+class FunctorProxy<T,
+    typename std::enable_if<std::is_constructible<std::function<Result()>,
+        const T &>::value>::type> : public ProxyInfo
+{
+  private:
+    std::function<Result()> functor;
+
+  public:
+    FunctorProxy(const T &func) : functor(func) {}
+    Counter value() const { return functor(); }
+    Result result() const { return functor(); }
+    Result total() const { return functor(); }
 };
 
 /**
@@ -845,6 +864,15 @@ class ValueBase : public DataWrap<Derived, ScalarInfoProxy>
     scalar(T &value)
     {
         proxy = new ValueProxy<T>(value);
+        this->setInit();
+        return this->self();
+    }
+
+    template <class T>
+    Derived &
+    functor(const T &func)
+    {
+        proxy = new FunctorProxy<T>(func);
         this->setInit();
         return this->self();
     }
@@ -1161,7 +1189,7 @@ class VectorBase : public DataWrapVec<Derived, VectorInfoProxy>
     Proxy
     operator[](off_type index)
     {
-        assert (index >= 0 && index < size());
+        assert (index < size());
         return Proxy(this->self(), index);
     }
 };
@@ -1235,7 +1263,7 @@ class VectorProxy
     ScalarProxy<Stat>
     operator[](off_type index)
     {
-        assert (index >= 0 && index < size());
+        assert (index < size());
         return ScalarProxy<Stat>(stat, offset + index);
     }
 
@@ -1311,7 +1339,7 @@ class Vector2dBase : public DataWrapVec2d<Derived, Vector2dInfoProxy>
     operator[](off_type index)
     {
         off_type offset = index * y;
-        assert (index >= 0 && offset + y <= size());
+        assert (offset + y <= size());
         return Proxy(this->self(), offset, y);
     }
 
@@ -1995,7 +2023,7 @@ class VectorDistBase : public DataWrapVec<Derived, VectorDistInfoProxy>
 
     Proxy operator[](off_type index)
     {
-        assert(index >= 0 && index < size());
+        assert(index < size());
         return Proxy(this->self(), index);
     }
 
@@ -3364,13 +3392,13 @@ void registerHandlers(Handler reset_handler, Handler dump_handler);
  * Register a callback that should be called whenever statistics are
  * reset
  */
-void registerResetCallback(Callback *cb);
+void registerResetCallback(const std::function<void()> &callback);
 
 /**
  * Register a callback that should be called whenever statistics are
  * about to be dumped
  */
-void registerDumpCallback(Callback *cb);
+void registerDumpCallback(const std::function<void()> &callback);
 
 /**
  * Process all the callbacks in the reset callbacks queue

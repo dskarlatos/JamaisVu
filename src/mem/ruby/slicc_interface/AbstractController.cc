@@ -43,7 +43,6 @@
 #include "debug/RubyQueue.hh"
 #include "mem/ruby/network/Network.hh"
 #include "mem/ruby/protocol/MemoryMsg.hh"
-#include "mem/ruby/system/GPUCoalescer.hh"
 #include "mem/ruby/system/RubySystem.hh"
 #include "mem/ruby/system/Sequencer.hh"
 #include "sim/system.hh"
@@ -51,25 +50,24 @@
 AbstractController::AbstractController(const Params *p)
     : ClockedObject(p), Consumer(this), m_version(p->version),
       m_clusterID(p->cluster_id),
-      m_masterId(p->system->getMasterId(this)), m_is_blocking(false),
+      m_id(p->system->getRequestorId(this)), m_is_blocking(false),
       m_number_of_TBEs(p->number_of_TBEs),
       m_transitions_per_cycle(p->transitions_per_cycle),
       m_buffer_size(p->buffer_size), m_recycle_latency(p->recycle_latency),
       m_mandatory_queue_latency(p->mandatory_queue_latency),
-      memoryPort(csprintf("%s.memory", name()), this, ""),
+      memoryPort(csprintf("%s.memory", name()), this),
       addrRanges(p->addr_ranges.begin(), p->addr_ranges.end())
 {
     if (m_version == 0) {
         // Combine the statistics from all controllers
         // of this particular type.
-        Stats::registerDumpCallback(new StatsCallback(this));
+        Stats::registerDumpCallback([this]() { collateStats(); });
     }
 }
 
 void
 AbstractController::init()
 {
-    params()->ruby_system->registerAbstractController(this);
     m_delayHistogram.init(10);
     uint32_t size = Network::getNumberOfVirtualNetworks();
     for (uint32_t i = 0; i < size; i++) {
@@ -151,8 +149,7 @@ AbstractController::wakeUpAllBuffers(Addr addr)
 {
     if (m_waiting_buffers.count(addr) > 0) {
         //
-        // Wake up all possible lower rank (i.e. lower priority) buffers that could
-        // be waiting on this message.
+        // Wake up all possible buffers that could be waiting on this message.
         //
         for (int in_port_rank = m_in_ports - 1;
              in_port_rank >= 0;
@@ -222,7 +219,7 @@ AbstractController::serviceMemoryQueue()
     }
 
     RequestPtr req
-        = std::make_shared<Request>(mem_msg->m_addr, req_size, 0, m_masterId);
+        = std::make_shared<Request>(mem_msg->m_addr, req_size, 0, m_id);
     PacketPtr pkt;
     if (mem_msg->getType() == MemoryRequestType_MEMORY_WB) {
         pkt = Packet::createWrite(req);
@@ -250,12 +247,15 @@ AbstractController::serviceMemoryQueue()
         // to make more progress. Make sure it wakes up
         scheduleEvent(Cycles(1));
         recvTimingResp(pkt);
-    } else {
+    } else if (memoryPort.sendTimingReq(pkt)) {
         mem_queue->dequeue(clockEdge());
-        memoryPort.schedTimingReq(pkt, clockEdge());
         // Since the queue was popped the controller may be able
         // to make more progress. Make sure it wakes up
         scheduleEvent(Cycles(1));
+    } else {
+        scheduleEvent(Cycles(1));
+        delete pkt;
+        delete s;
     }
 
     return true;
@@ -305,11 +305,6 @@ int
 AbstractController::functionalMemoryWrite(PacketPtr pkt)
 {
     int num_functional_writes = 0;
-
-    // Check the buffer from the controller to the memory.
-    if (memoryPort.trySatisfyFunctional(pkt)) {
-        num_functional_writes++;
-    }
 
     // Update memory itself.
     memoryPort.sendFunctional(pkt);
@@ -369,12 +364,15 @@ AbstractController::MemoryPort::recvTimingResp(PacketPtr pkt)
     return true;
 }
 
+void
+AbstractController::MemoryPort::recvReqRetry()
+{
+    controller->serviceMemoryQueue();
+}
+
 AbstractController::MemoryPort::MemoryPort(const std::string &_name,
                                            AbstractController *_controller,
-                                           const std::string &_label)
-    : QueuedMasterPort(_name, _controller, reqQueue, snoopRespQueue),
-      reqQueue(*_controller, *this, _label),
-      snoopRespQueue(*_controller, *this, false, _label),
-      controller(_controller)
+                                           PortID id)
+    : RequestPort(_name, _controller, id), controller(_controller)
 {
 }

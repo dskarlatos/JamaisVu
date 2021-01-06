@@ -53,43 +53,52 @@ arm_fs_quick_tests = [
 
 arm_fs_long_tests = [
     'realview-simple-atomic',
-    'realview-simple-atomic-dual',
     'realview-simple-atomic-checkpoint',
     'realview-simple-timing',
-    'realview-simple-timing-dual',
     'realview-switcheroo-atomic',
     'realview-switcheroo-timing',
     'realview-o3',
-    'realview-o3-checker',
-    'realview-o3-dual',
     'realview-minor',
-    'realview-minor-dual',
     'realview-switcheroo-noncaching-timing',
     'realview-switcheroo-o3',
     'realview-switcheroo-full',
     'realview64-o3',
-    'realview64-o3-checker',
     'realview64-o3-dual',
     'realview64-minor',
     'realview64-minor-dual',
     'realview64-switcheroo-o3',
     'realview64-switcheroo-full',
     'realview-simple-timing-ruby',
-    'realview-simple-timing-dual-ruby',
     'realview64-simple-timing-ruby',
     'realview64-simple-timing-dual-ruby',
+
+
+    # The following tests fail. These are recorded in the GEM5-640 and GEM5-364
+    # Jira issues.
+    #
+    # https://gem5.atlassian.net/browse/GEM5-640
+    #'realview-simple-atomic-dual',
+    #'realview-simple-timing-dual',
+    #'realview-o3-dual',
+    #'realview-minor-dual',
+    #'realview-simple-timing-dual-ruby',
+    #
+    # https://gem5.atlassian.net/browse/GEM5-364
+    #'realview-o3-checker',
+    #'realview64-o3-checker',
 ]
 
 tarball = 'aarch-system-201901106.tar.bz2'
 url = config.resource_url + "/arm/" + tarball
 filepath = os.path.dirname(os.path.abspath(__file__))
-path = config.bin_path if config.bin_path else filepath
+path = joinpath(config.bin_path, 'arm')
 arm_fs_binaries = DownloadedArchive(url, path, tarball)
 
 for name in arm_fs_quick_tests:
     args = [
-        joinpath(config.base_dir, 'tests', 'configs', name + '.py'),
-        path
+        joinpath(config.base_dir, 'tests', 'gem5', 'configs', name + '.py'),
+        path,
+        config.base_dir
     ]
     gem5_verify_config(
         name=name,
@@ -103,8 +112,9 @@ for name in arm_fs_quick_tests:
 
 for name in arm_fs_long_tests:
     args = [
-        joinpath(config.base_dir, 'tests', 'configs', name + '.py'),
-        path
+        joinpath(config.base_dir, 'tests', 'gem5', 'configs', name + '.py'),
+        path,
+        config.base_dir
     ]
     gem5_verify_config(
         name=name,

@@ -51,6 +51,7 @@
 #include <functional>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "base/trace.hh"
@@ -73,6 +74,8 @@ class MessageBuffer : public SimObject
     void reanalyzeMessages(Addr addr, Tick current_time);
     void reanalyzeAllMessages(Tick current_time);
     void stallMessage(Addr addr, Tick current_time);
+    // return true if the stall map has a message of this address
+    bool hasStalledMsg(Addr addr) const;
 
     // TRUE if head of queue timestamp <= SystemTime
     bool isReady(Tick current_time) const;
@@ -112,6 +115,18 @@ class MessageBuffer : public SimObject
     const MsgPtr &peekMsgPtr() const { return m_prio_heap.front(); }
 
     void enqueue(MsgPtr message, Tick curTime, Tick delta);
+
+    // Defer enqueueing a message to a later cycle by putting it aside and not
+    // enqueueing it in this cycle
+    // The corresponding controller will need to explicitly enqueue the
+    // deferred message into the message buffer. Otherwise, the message will
+    // be lost.
+    void deferEnqueueingMessage(Addr addr, MsgPtr message);
+
+    // enqueue all previously deferred messages that are associated with the
+    // input address
+    void enqueueDeferredMessages(Addr addr, Tick curTime, Tick delay);
+    bool isDeferredMsgMapEmpty(Addr addr) const;
 
     //! Updates the delay cycles of the message at the head of the queue,
     //! removes it from the queue and returns its total delay.
@@ -190,6 +205,14 @@ class MessageBuffer : public SimObject
      * older requests with younger ones.
      */
     StallMsgMapType m_stall_msg_map;
+
+    /**
+     * A map from line addresses to corresponding vectors of messages that
+     * are deferred for enqueueing. Messages in this map are waiting to be
+     * enqueued into the message buffer.
+     */
+    typedef std::unordered_map<Addr, std::vector<MsgPtr>> DeferredMsgMapType;
+    DeferredMsgMapType m_deferred_msg_map;
 
     /**
      * Current size of the stall map.

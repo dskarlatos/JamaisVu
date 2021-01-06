@@ -32,16 +32,8 @@
 #include "arch/types.hh"
 #include "config/the_isa.hh"
 #include "cpu/base.hh"
-#include "cpu/profile.hh"
 #include "cpu/thread_context.hh"
 #include "sim/process.hh"
-
-class EndQuiesceEvent;
-class FunctionProfile;
-class ProfileNode;
-namespace Kernel {
-    class Statistics;
-}
 
 class Checkpoint;
 
@@ -86,16 +78,6 @@ struct ThreadState : public Serializable {
      */
     void initMemProxies(ThreadContext *tc);
 
-    void dumpFuncProfile();
-
-    EndQuiesceEvent *getQuiesceEvent() { return quiesceEvent; }
-
-    void profileClear();
-
-    void profileSample();
-
-    Kernel::Statistics *getKernelStats() { return kernelStats; }
-
     PortProxy &getPhysProxy();
 
     PortProxy &getVirtProxy();
@@ -124,14 +106,19 @@ struct ThreadState : public Serializable {
 
     /** Number of instructions committed. */
     Counter numInst;
-    /** Stat for number instructions committed. */
-    Stats::Scalar numInsts;
-    /** Number of ops (including micro ops) committed. */
+     /** Number of ops (including micro ops) committed. */
     Counter numOp;
-    /** Stat for number ops (including micro ops) committed. */
-    Stats::Scalar numOps;
-    /** Stat for number of memory references. */
-    Stats::Scalar numMemRefs;
+    // Defining the stat group
+    struct ThreadStateStats : public Stats::Group
+    {
+        ThreadStateStats(BaseCPU *cpu, const ThreadID& thread);
+        /** Stat for number instructions committed. */
+        Stats::Scalar numInsts;
+        /** Stat for number ops (including micro ops) committed. */
+        Stats::Scalar numOps;
+        /** Stat for number of memory references. */
+        Stats::Scalar numMemRefs;
+    } threadStats;
 
     /** Number of simulated loads, used for tracking events based on
      * the number of loads committed.
@@ -159,14 +146,6 @@ struct ThreadState : public Serializable {
 
     /** Last time suspend was called on this thread. */
     Tick lastSuspend;
-
-  public:
-    FunctionProfile *profile;
-    ProfileNode *profileNode;
-    Addr profilePC;
-    EndQuiesceEvent *quiesceEvent;
-
-    Kernel::Statistics *kernelStats;
 
   protected:
     Process *process;

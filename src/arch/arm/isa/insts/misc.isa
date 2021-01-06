@@ -40,10 +40,14 @@ let {{
     svcCode = '''
     ThreadContext *tc = xc->tcBase();
 
-    const auto semihost_imm = Thumb? 0xAB : 0x123456;
-
-    if (ArmSystem::haveSemihosting(tc) && imm == semihost_imm) {
+    bool have_semi = ArmSystem::haveSemihosting(tc);
+    if (have_semi && Thumb && imm == ArmSemihosting::T32Imm) {
+        // Enable gem5 extensions since we can't distinguish in thumb.
+        ArmSystem::callSemihosting32(tc, true);
+    } else if (have_semi && imm == ArmSemihosting::A32Imm) {
         ArmSystem::callSemihosting32(tc);
+    } else if (have_semi && imm == ArmSemihosting::Gem5Imm) {
+        ArmSystem::callSemihosting32(tc, true);
     } else {
         fault = std::make_shared<SupervisorCall>(machInst, imm);
     }
@@ -91,8 +95,7 @@ let {{
     SCR  scr  = Scr;
 
     if ((cpsr.mode != MODE_USER) && FullSystem) {
-        if (ArmSystem::haveVirtualization(xc->tcBase()) &&
-            !inSecureState(scr, cpsr) && (cpsr.mode != MODE_HYP) && hcr.tsc) {
+        if (EL2Enabled(xc->tcBase()) && (cpsr.mode != MODE_HYP) && hcr.tsc) {
             fault = std::make_shared<HypervisorTrap>(machInst, 0,
                                                      EC_SMC_TO_HYP);
         } else {
@@ -116,13 +119,15 @@ let {{
     exec_output += PredOpExecute.subst(smcIop)
 
     hvcCode = '''
+    HCR  hcr  = Hcr;
     CPSR cpsr = Cpsr;
     SCR  scr  = Scr;
 
     // Filter out the various cases where this instruction isn't defined
     if (!FullSystem || !ArmSystem::haveVirtualization(xc->tcBase()) ||
         (cpsr.mode == MODE_USER) ||
-        (ArmSystem::haveSecurity(xc->tcBase()) && (!scr.ns || !scr.hce))) {
+        (isSecure(xc->tcBase()) && !IsSecureEL2Enabled(xc->tcBase())) ||
+        (ArmSystem::haveSecurity(xc->tcBase()) ? !scr.hce : hcr.hcd)) {
         fault = disabledFault();
     } else {
         fault = std::make_shared<HypervisorCall>(machInst, imm);
@@ -138,6 +143,12 @@ let {{
     exec_output += PredOpExecute.subst(hvcIop)
 
     eretCode = '''
+        if (xc->inHtmTransactionalState()) {
+            fault = std::make_shared<GenericHtmFailureFault>(
+                xc->getHtmTransactionUid(),
+                HtmFailureFaultCause::EXCEPTION);
+            return fault;
+        }
         SCTLR sctlr   = Sctlr;
         CPSR old_cpsr = Cpsr;
         old_cpsr.nz   = CondCodesNZ;
@@ -717,18 +728,19 @@ let {{
 
     // WFE Sleeps if SevMailbox==0 and no unmasked interrupts are pending,
     ThreadContext *tc = xc->tcBase();
+    Tick next_cycle = tc->getCpuPtr()->nextCycle();
     if (SevMailbox == 1) {
         SevMailbox = 0;
-        PseudoInst::quiesceSkip(tc);
+        tc->quiesceTick(next_cycle + 1);
     } else if (tc->getCpuPtr()->getInterruptController(
-                tc->threadId())->checkInterrupts(tc)) {
-        PseudoInst::quiesceSkip(tc);
+                tc->threadId())->checkInterrupts()) {
+        tc->quiesceTick(next_cycle + 1);
     } else {
         fault = trapWFx(tc, cpsr, scr, true);
         if (fault == NoFault) {
-            PseudoInst::quiesce(tc);
+            tc->quiesce();
         } else {
-            PseudoInst::quiesceSkip(tc);
+            tc->quiesceTick(next_cycle + 1);
         }
     }
     '''
@@ -748,6 +760,12 @@ let {{
     exec_output += QuiescePredOpExecuteWithFixup.subst(wfeIop)
 
     wfiCode = '''
+    if (xc->inHtmTransactionalState()) {
+        fault = std::make_shared<GenericHtmFailureFault>(
+            xc->getHtmTransactionUid(),
+            HtmFailureFaultCause::EXCEPTION);
+        return fault;
+    }
     HCR  hcr  = Hcr;
     CPSR cpsr = Cpsr;
     SCR  scr  = Scr64;
@@ -756,15 +774,16 @@ let {{
     ThreadContext *tc = xc->tcBase();
     auto *ic = dynamic_cast<ArmISA::Interrupts *>(
             tc->getCpuPtr()->getInterruptController(tc->threadId()));
+    Tick next_cycle = tc->getCpuPtr()->nextCycle();
     if (ic->checkWfiWake(hcr, cpsr, scr)) {
-        PseudoInst::quiesceSkip(tc);
+        tc->quiesceTick(next_cycle + 1);
     } else {
         fault = trapWFx(tc, cpsr, scr, false);
         if (fault == NoFault) {
-            PseudoInst::quiesce(tc);
+            tc->quiesce();
             ArmSystem::callSetStandByWfi(tc);
         } else {
-            PseudoInst::quiesceSkip(tc);
+            tc->quiesceTick(next_cycle + 1);
         }
     }
     tc->getCpuPtr()->clearInterrupt(tc->threadId(), INT_ABT, 0);
@@ -780,8 +799,8 @@ let {{
     sevCode = '''
     SevMailbox = 1;
     System *sys = xc->tcBase()->getSystemPtr();
-    for (int x = 0; x < sys->numContexts(); x++) {
-        ThreadContext *oc = sys->getThreadContext(x);
+    for (int x = 0; x < sys->threads.size(); x++) {
+        ThreadContext *oc = sys->threads[x];
         if (oc == xc->tcBase())
             continue;
 
@@ -930,7 +949,7 @@ let {{
     // the register is accessable, in other modes we trap if only if the register
     // IS accessable.
     if (undefined || (!can_read && !(fault != NoFault && !inUserMode(Cpsr) &&
-                                    !inSecureState(Scr, Cpsr)))) {
+                                    !isSecure(xc->tcBase())))) {
         return std::make_shared<UndefinedInstruction>(machInst, false,
                                                       mnemonic);
     }
@@ -964,7 +983,7 @@ let {{
     // the register is accessable, in other modes we trap if only if the register
     // IS accessable.
     if (undefined || (!can_write && !(fault != NoFault && !inUserMode(Cpsr) &&
-                                      !inSecureState(Scr, Cpsr)))) {
+                                      !isSecure(xc->tcBase())))) {
         return std::make_shared<UndefinedInstruction>(machInst, false,
                                                       mnemonic);
     }
@@ -997,7 +1016,7 @@ let {{
     // the register is accessable, in other modes we trap if only if the register
     // IS accessable.
     if (undefined || (!can_read && !(fault != NoFault && !inUserMode(Cpsr) &&
-                                     !inSecureState(Scr, Cpsr)))) {
+                                     !isSecure(xc->tcBase())))) {
         return std::make_shared<UndefinedInstruction>(machInst, false,
                                                       mnemonic);
     }
@@ -1031,7 +1050,7 @@ let {{
     // the register is accessable, in other modes we trap if only if the register
     // IS accessable.
     if (undefined || (!can_write && !(fault != NoFault && !inUserMode(Cpsr) &&
-                                     !inSecureState(Scr, Cpsr)))) {
+                                     !isSecure(xc->tcBase())))) {
         return std::make_shared<UndefinedInstruction>(machInst, false,
                                                       mnemonic);
     }
@@ -1109,7 +1128,7 @@ let {{
         // of whether the register is accessible, in other modes we
         // trap if only if the register IS accessible.
         if (undefined || (!can_write & !(hypTrap & !inUserMode(Cpsr) &
-                                         !inSecureState(Scr, Cpsr)))) {
+                                         !isSecure(xc->tcBase())))) {
             return std::make_shared<UndefinedInstruction>(machInst, false,
                                                           mnemonic);
         }

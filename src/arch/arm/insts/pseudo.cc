@@ -42,6 +42,8 @@
 
 #include "cpu/exec_context.hh"
 
+using namespace ArmISA;
+
 DecoderFaultInst::DecoderFaultInst(ExtMachInst _machInst)
     : ArmStaticInst("gem5decoderFault", _machInst, No_OpClass),
       faultId(static_cast<DecoderFault>(
@@ -189,4 +191,24 @@ Fault
 IllegalExecInst::execute(ExecContext *xc, Trace::InstRecord *traceData) const
 {
     return std::make_shared<IllegalInstSetStateFault>();
+}
+
+DebugStep::DebugStep(ExtMachInst _machInst)
+    : ArmStaticInst("DebugStep", _machInst, No_OpClass)
+{ }
+
+Fault
+DebugStep::execute(ExecContext *xc, Trace::InstRecord *traceData) const
+{
+    PCState pc_state(xc->pcState());
+    pc_state.debugStep(false);
+    xc->pcState(pc_state);
+
+    SelfDebug *sd = ArmISA::ISA::getSelfDebug(xc->tcBase());
+
+    bool ldx = sd->getSstep()->getLdx();
+
+    return std::make_shared<SoftwareStepFault>(machInst, ldx,
+                                               pc_state.stepped());
+
 }

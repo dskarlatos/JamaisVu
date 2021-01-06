@@ -42,23 +42,15 @@
 #ifndef __ARCH_RISCV_ISA_TRAITS_HH__
 #define __ARCH_RISCV_ISA_TRAITS_HH__
 
-#include "arch/riscv/types.hh"
 #include "base/types.hh"
-#include "cpu/static_inst_fwd.hh"
 
 namespace RiscvISA
 {
 
-const ByteOrder GuestByteOrder = LittleEndianByteOrder;
+const ByteOrder GuestByteOrder = ByteOrder::little;
 
 const Addr PageShift = 12;
 const Addr PageBytes = ULL(1) << PageShift;
-
-// Memory accesses can be unaligned (at least for double-word memory accesses)
-const bool HasUnalignedMemAcc = true;
-
-const bool CurThreadInfoImplemented = false;
-const int CurThreadInfoReg = -1;
 
 }
 

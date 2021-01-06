@@ -42,6 +42,7 @@
 #include "dev/hsa/kfd_ioctl.h"
 #include "params/HSADriver.hh"
 #include "sim/process.hh"
+#include "sim/proxy_ptr.hh"
 #include "sim/syscall_emul_buf.hh"
 
 HSADriver::HSADriver(HSADriverParams *p)
@@ -91,4 +92,27 @@ HSADriver::mmap(ThreadContext *tc, Addr start, uint64_t length, int prot,
                          length, false);
     DPRINTF(HSADriver, "amdkfd doorbell mapped to %xp\n", start);
     return start;
+}
+
+/**
+ * Forward relevant parameters to packet processor; queueID
+ * is used to link doorbell. The queueIDs are not re-used
+ * in current implementation, and we allocate only one page
+ * (4096 bytes) for doorbells, so check if this queue ID can
+ * be mapped into that page.
+ */
+void
+HSADriver::allocateQueue(ThreadContext *tc, Addr ioc_buf)
+{
+    VPtr<kfd_ioctl_create_queue_args> args(ioc_buf, tc);
+
+    if (queueId >= 0x1000) {
+        fatal("%s: Exceeded maximum number of HSA queues allowed\n", name());
+    }
+
+    args->queue_id = queueId++;
+    auto &hsa_pp = device->hsaPacketProc();
+    hsa_pp.setDeviceQueueDesc(args->read_pointer_address,
+                              args->ring_base_address, args->queue_id,
+                              args->ring_size);
 }

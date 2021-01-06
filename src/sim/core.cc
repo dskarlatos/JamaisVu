@@ -137,9 +137,9 @@ exitCallbacks()
  * Register an exit callback.
  */
 void
-registerExitCallback(Callback *callback)
+registerExitCallback(const std::function<void()> &callback)
 {
-    exitCallbacks().add(callback);
+    exitCallbacks().push_back(callback);
 }
 
 /**

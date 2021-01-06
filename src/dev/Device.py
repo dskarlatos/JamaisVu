@@ -46,7 +46,7 @@ class PioDevice(ClockedObject):
     type = 'PioDevice'
     cxx_header = "dev/io_device.hh"
     abstract = True
-    pio = SlavePort("Programmed I/O port")
+    pio = ResponsePort("Programmed I/O port")
     system = Param.System(Parent.any, "System this device is part of")
 
     def generateBasicPioDeviceNode(self, state, name, pio_addr,
@@ -57,14 +57,14 @@ class PioDevice(ClockedObject):
             state.sizeCells(size) ))
 
         if interrupts:
-            if any([i < 32 for i in interrupts]):
+            if any([i.num < 32 for i in interrupts]):
                 raise(("Interrupt number smaller than 32 "+
                        " in PioDevice %s") % name)
 
             # subtracting 32 because Linux assumes that SPIs start at 0, while
             # gem5 uses the internal GIC numbering (SPIs start at 32)
             node.append(FdtPropertyWords("interrupts", sum(
-                [[0, i  - 32, 4] for i in interrupts], []) ))
+                [[0, i.num  - 32, 4] for i in interrupts], []) ))
 
         return node
 
@@ -79,7 +79,7 @@ class DmaDevice(PioDevice):
     type = 'DmaDevice'
     cxx_header = "dev/dma_device.hh"
     abstract = True
-    dma = MasterPort("DMA port")
+    dma = RequestPort("DMA port")
 
     _iommu = None
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Inria
+ * Copyright (c) 2019-2020 Inria
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -43,7 +43,9 @@
 
 struct PerfectCompressorParams;
 
-class PerfectCompressor : public BaseCacheCompressor
+namespace Compressor {
+
+class Perfect : public Base
 {
   protected:
     class CompData;
@@ -57,31 +59,36 @@ class PerfectCompressor : public BaseCacheCompressor
     /** Number of cycles needed to perform decompression. */
     const Cycles decompressionLatency;
 
-    std::unique_ptr<CompressionData> compress(const uint64_t* cache_line,
-        Cycles& comp_lat, Cycles& decomp_lat) override;
+    std::unique_ptr<CompressionData> compress(
+        const std::vector<Chunk>& chunks, Cycles& comp_lat,
+        Cycles& decomp_lat) override;
 
     void decompress(const CompressionData* comp_data, uint64_t* data) override;
 
   public:
     typedef PerfectCompressorParams Params;
-    PerfectCompressor(const Params *p);
-    ~PerfectCompressor() {};
+    Perfect(const Params *p);
+    ~Perfect() = default;
 };
 
-class PerfectCompressor::CompData : public CompressionData
+class Perfect::CompData : public CompressionData
 {
   public:
     /** The original data is simply copied over to this vector. */
-    std::vector<uint64_t> entries;
+    std::vector<Chunk> chunks;
 
     /**
      * Default constructor that creates a copy of the original data.
      *
-     * @param data The data to be compressed.
-     * @param num_entries The number of qwords in the data.
+     * @param chunks The data to be compressed.
      */
-    CompData(const uint64_t* data, std::size_t num_entries);
+    CompData(const std::vector<Chunk>& chunks)
+      : CompressionData(), chunks(chunks)
+    {
+    }
     ~CompData() = default;
 };
+
+} // namespace Compressor
 
 #endif //__MEM_CACHE_COMPRESSORS_PERFECT_COMPRESSOR_HH__

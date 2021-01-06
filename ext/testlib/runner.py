@@ -1,3 +1,15 @@
+# Copyright (c) 2020 ARM Limited
+# All rights reserved.
+#
+# The license below extends only to copyright in the software and shall
+# not be construed as granting a license to any other intellectual
+# property including but not limited to intellectual property relating
+# to a hardware implementation of the functionality of the software
+# licensed hereunder.  You may use the software subject to the license
+# terms below provided that you ensure that this notice is replicated
+# unmodified and in its entirety in all distributions of the software,
+# modified or unmodified, in source code or in binary form.
+#
 # Copyright (c) 2017 Mark D. Hill and David A. Wood
 # All rights reserved.
 #
@@ -27,13 +39,10 @@
 # Authors: Sean Wilson
 
 import multiprocessing.dummy
-import threading
 import traceback
 
 import testlib.helper as helper
-import testlib.state as state
 import testlib.log as log
-import testlib.sandbox as sandbox
 
 from testlib.state import Status, Result
 from testlib.fixture import SkipException
@@ -68,7 +77,8 @@ class TestParameters(object):
     def __init__(self, test, suite):
         self.test = test
         self.suite = suite
-        self.log = log.TestLogWrapper(log.test_log, test, suite)
+        self.log = log.test_log
+        self.log.test = test
 
     @helper.cacheresult
     def _fixtures(self):
@@ -118,6 +128,7 @@ class RunnerPattern:
             self.testable.status = Status.Running
             self.test()
         finally:
+            self.builder.post_test_procedure(self.testable)
             self.testable.status = Status.TearingDown
             self.builder.teardown(self.testable)
 
@@ -128,14 +139,14 @@ class RunnerPattern:
 
 class TestRunner(RunnerPattern):
     def test(self):
-        self.sandbox_test()
+        test_params = TestParameters(
+            self.testable,
+            self.testable.parent_suite)
 
-    def sandbox_test(self):
         try:
-            sandbox.Sandbox(TestParameters(
-                    self.testable,
-                    self.testable.parent_suite))
-        except sandbox.SubprocessException:
+            # Running the test
+            test_params.test.test(test_params)
+        except Exception:
             self.testable.result = Result(Result.Failed,
                     traceback.format_exc())
         else:
@@ -158,9 +169,6 @@ class LibraryParallelRunner(RunnerPattern):
     def set_threads(self, threads):
         self.threads = threads
 
-    def _entrypoint(self, suite):
-        suite.runner(suite).run()
-
     def test(self):
         pool = multiprocessing.dummy.Pool(self.threads)
         pool.map(lambda suite : suite.runner(suite).run(), self.testable)
@@ -170,8 +178,6 @@ class LibraryParallelRunner(RunnerPattern):
 
 class BrokenFixtureException(Exception):
     def __init__(self, fixture, testitem, trace):
-        self.fixture = fixture
-        self.testitem = testitem
         self.trace = trace
 
         self.msg = ('%s\n'
@@ -203,6 +209,10 @@ class FixtureBuilder(object):
 
                 raise BrokenFixtureException(fixture, testitem,
                         traceback.format_exc())
+
+    def post_test_procedure(self, testitem):
+        for fixture in self.built_fixtures:
+            fixture.post_test_procedure(testitem)
 
     def teardown(self, testitem):
         for fixture in self.built_fixtures:

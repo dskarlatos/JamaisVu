@@ -204,7 +204,7 @@ def findCptDir(options, cptdir, testsys):
             if match:
                 cpts.append(match.group(1))
 
-        cpts.sort(lambda a,b: cmp(long(a), long(b)))
+        cpts.sort(key = lambda a: long(a))
 
         cpt_num = options.checkpoint_restore
         if cpt_num > len(cpts):
@@ -458,6 +458,12 @@ def run(options, root, testsys, cpu_class):
 
     if options.repeat_switch and options.take_checkpoints:
         fatal("Can't specify both --repeat-switch and --take-checkpoints")
+
+    # Setup global stat filtering.
+    stat_root_simobjs = []
+    for stat_root_str in options.stats_root:
+        stat_root_simobjs.extend(root.get_simobj(stat_root_str))
+    m5.stats.global_dump_roots = stat_root_simobjs
 
     np = options.num_cpus
     switch_cpus = None

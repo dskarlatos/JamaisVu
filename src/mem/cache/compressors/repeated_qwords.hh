@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Inria
+ * Copyright (c) 2019-2020 Inria
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -43,7 +43,9 @@
 
 struct RepeatedQwordsCompressorParams;
 
-class RepeatedQwordsCompressor : public DictionaryCompressor<uint64_t>
+namespace Compressor {
+
+class RepeatedQwords : public DictionaryCompressor<uint64_t>
 {
   protected:
     using DictionaryEntry = DictionaryCompressor<uint64_t>::DictionaryEntry;
@@ -89,16 +91,17 @@ class RepeatedQwordsCompressor : public DictionaryCompressor<uint64_t>
 
     void addToDictionary(DictionaryEntry data) override;
 
-    std::unique_ptr<BaseCacheCompressor::CompressionData> compress(
-        const uint64_t* data, Cycles& comp_lat, Cycles& decomp_lat) override;
+    std::unique_ptr<Base::CompressionData> compress(
+        const std::vector<Base::Chunk>& chunks,
+        Cycles& comp_lat, Cycles& decomp_lat) override;
 
   public:
     typedef RepeatedQwordsCompressorParams Params;
-    RepeatedQwordsCompressor(const Params *p);
-    ~RepeatedQwordsCompressor() = default;
+    RepeatedQwords(const Params *p);
+    ~RepeatedQwords() = default;
 };
 
-class RepeatedQwordsCompressor::PatternX
+class RepeatedQwords::PatternX
     : public DictionaryCompressor::UncompressedPattern
 {
   public:
@@ -108,15 +111,17 @@ class RepeatedQwordsCompressor::PatternX
     }
 };
 
-class RepeatedQwordsCompressor::PatternM
+class RepeatedQwords::PatternM
     : public DictionaryCompressor::LocatedMaskedPattern<0xFFFFFFFFFFFFFFFF, 0>
 {
   public:
     PatternM(const DictionaryEntry bytes, const int match_location)
         : LocatedMaskedPattern<0xFFFFFFFFFFFFFFFF, 0>(M, 1, 0, match_location,
-          bytes)
+          bytes, false)
     {
     }
 };
+
+} // namespace Compressor
 
 #endif //__MEM_CACHE_COMPRESSORS_REPEATED_QWORDS_HH__

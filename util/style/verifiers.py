@@ -239,7 +239,7 @@ class LineVerifier(Verifier):
         for num,line in enumerate(fobj):
             if num not in regions:
                 continue
-            s_line = line.decode().rstrip('\n')
+            s_line = line.decode('utf-8').rstrip('\n')
             if not self.check_line(s_line, language=lang):
                 if not silent:
                     self.ui.write("invalid %s in %s:%d\n" % \
@@ -347,11 +347,11 @@ class SortedIncludes(Verifier):
     def check(self, filename, regions=all_regions, fobj=None, silent=False):
         close = False
         if fobj is None:
-            fobj = self.open(filename, 'r')
+            fobj = self.open(filename, 'rb')
             close = True
         norm_fname = self.normalize_filename(filename)
 
-        old = [ l.decode().rstrip('\n') for l in fobj ]
+        old = [ l.decode('utf-8').rstrip('\n') for l in fobj ]
         if close:
             fobj.close()
 

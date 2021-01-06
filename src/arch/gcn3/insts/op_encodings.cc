@@ -160,6 +160,14 @@ namespace Gcn3ISA
 
         // copy first instruction DWORD
         instData = iFmt[0];
+        if (hasSecondDword(iFmt)) {
+            // copy second instruction DWORD into union
+            extData = ((MachInst)iFmt)[1];
+            _srcLiteral = *reinterpret_cast<uint32_t*>(&iFmt[1]);
+            varSize = 4 + 4;
+        } else {
+            varSize = 4;
+        } // if
     } // Inst_SOPK
 
     Inst_SOPK::~Inst_SOPK()
@@ -169,18 +177,43 @@ namespace Gcn3ISA
     int
     Inst_SOPK::instSize() const
     {
-        return 4;
+        return varSize;
     } // instSize
+
+    bool
+    Inst_SOPK::hasSecondDword(InFmt_SOPK *iFmt)
+    {
+        /*
+          SOPK can be a 64-bit instruction, i.e., have a second dword:
+          S_SETREG_IMM32_B32 writes some or all of the LSBs of a 32-bit
+          literal constant into a hardware register;
+          the way to detect such special case is to explicitly check the
+          opcode (20/0x14)
+        */
+        if (iFmt->OP == 0x14)
+            return true;
+
+        return false;
+    }
+
 
     void
     Inst_SOPK::generateDisassembly()
     {
         std::stringstream dis_stream;
         dis_stream << _opcode << " ";
-        dis_stream << opSelectorToRegSym(instData.SDST) << ", ";
 
-            dis_stream << "0x" << std::hex << std::setfill('0') << std::setw(4)
-                       << instData.SIMM16;
+        // S_SETREG_IMM32_B32 is a 64-bit instruction, using a
+        // 32-bit literal constant
+        if (instData.OP == 0x14) {
+            dis_stream << "0x" << std::hex << std::setfill('0')
+                    << std::setw(8) << extData.imm_u32 << ", ";
+        } else {
+            dis_stream << opSelectorToRegSym(instData.SDST) << ", ";
+        }
+
+        dis_stream << "0x" << std::hex << std::setfill('0') << std::setw(4)
+                     << instData.SIMM16;
 
         disassembly = dis_stream.str();
     }
@@ -293,7 +326,12 @@ namespace Gcn3ISA
 
         switch (opIdx) {
           case 0:
-              return isScalarReg(instData.SSRC0);
+            if (instData.OP == 0x1C) {
+                // Special case for s_getpc, which has no source reg.
+                // Instead, it implicitly reads the PC.
+                return isScalarReg(instData.SDST);
+            }
+            return isScalarReg(instData.SSRC0);
           case 1:
               return isScalarReg(instData.SDST);
           default:
@@ -320,6 +358,12 @@ namespace Gcn3ISA
 
         switch (opIdx) {
           case 0:
+            if (instData.OP == 0x1C) {
+                // Special case for s_getpc, which has no source reg.
+                // Instead, it implicitly reads the PC.
+                return opSelectorToRegIdx(instData.SDST,
+                        gpuDynInst->wavefront()->reservedScalarRegs);
+            }
             return opSelectorToRegIdx(instData.SSRC0,
                     gpuDynInst->wavefront()->reservedScalarRegs);
           case 1:
@@ -763,7 +807,8 @@ namespace Gcn3ISA
                        << extData.imm_u32 << ", ";
         }
 
-        dis_stream << "v" << instData.VSRC1;
+        dis_stream << std::resetiosflags(std::ios_base::basefield) << "v"
+            << instData.VSRC1;
 
         if (readsVCC())
             dis_stream << ", vcc";
@@ -1842,12 +1887,14 @@ namespace Gcn3ISA
             } else if (numDstRegOperands()) {
                 return extData.VDST;
             }
+            break;
           case 2:
             if (numSrcRegOperands() > 2) {
                 return extData.DATA1;
             } else if (numDstRegOperands()) {
                 return extData.VDST;
             }
+            break;
           case 3:
             assert(numDstRegOperands());
             return extData.VDST;
@@ -1855,6 +1902,8 @@ namespace Gcn3ISA
             fatal("Operand at idx %i does not exist\n", opIdx);
             return -1;
         }
+        fatal("Operand at idx %i does not exist\n", opIdx);
+        return -1;
     }
 
     // --- Inst_MUBUF base class methods ---

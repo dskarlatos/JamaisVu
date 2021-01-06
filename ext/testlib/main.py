@@ -30,7 +30,6 @@ import os
 import itertools
 
 import testlib.configuration as configuration
-import testlib.fixture as fixture_mod
 import testlib.handlers as handlers
 import testlib.loader as loader_mod
 import testlib.log as log
@@ -56,7 +55,7 @@ class RunLogHandler():
         self.mp_handler = handlers.MultiprocessingHandlerWrapper(
                 summary_handler, term_handler)
         self.mp_handler.async_process()
-        log.test_log.log_obj.add_handler(self.mp_handler)
+        log.test_log.add_handler(self.mp_handler)
         entry_message()
 
     def schedule_finalized(self, test_schedule):
@@ -214,7 +213,7 @@ def do_list():
         verbosity=configuration.config.verbose+log.LogLevel.Info,
         machine_only=configuration.config.quiet
     )
-    log.test_log.log_obj.add_handler(term_handler)
+    log.test_log.add_handler(term_handler)
 
     entry_message()
 

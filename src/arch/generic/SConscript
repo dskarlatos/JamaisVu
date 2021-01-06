@@ -1,4 +1,4 @@
-# Copyright (c) 2016 ARM Limited
+# Copyright (c) 2016, 2020 ARM Limited
 # All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
@@ -38,10 +38,13 @@
 
 Import('*')
 
+Source('htm.cc')
+
 if env['TARGET_ISA'] == 'null':
     Return()
 
 Source('decode_cache.cc')
+Source('decoder.cc')
 
 SimObject('BaseInterrupts.py')
 SimObject('BaseISA.py')

@@ -43,7 +43,8 @@ MemState::MemState(Process *owner, Addr brk_point, Addr stack_base,
                    Addr mmap_end)
     : _ownerProcess(owner),
       _pageBytes(owner->system->getPageBytes()), _brkPoint(brk_point),
-      _stackBase(stack_base), _maxStackSize(max_stack_size),
+      _stackBase(stack_base), _stackSize(max_stack_size),
+      _maxStackSize(max_stack_size), _stackMin(stack_base - max_stack_size),
       _nextThreadStackBase(next_thread_stack_base),
       _mmapEnd(mmap_end), _endBrkPoint(brk_point)
 {
@@ -256,7 +257,7 @@ MemState::unmapRegion(Addr start_addr, Addr length)
      * There is currently no general method across all TLB implementations
      * that can flush just part of the address space.
      */
-    for (auto tc : _ownerProcess->system->threadContexts) {
+    for (auto *tc: _ownerProcess->system->threads) {
         tc->getDTBPtr()->flushAll();
         tc->getITBPtr()->flushAll();
     }
@@ -358,7 +359,7 @@ MemState::remapRegion(Addr start_addr, Addr new_start_addr, Addr length)
      * There is currently no general method across all TLB implementations
      * that can flush just part of the address space.
      */
-    for (auto tc : _ownerProcess->system->threadContexts) {
+    for (auto *tc: _ownerProcess->system->threads) {
         tc->getDTBPtr()->flushAll();
         tc->getITBPtr()->flushAll();
     }
@@ -405,8 +406,7 @@ MemState::fixupFault(Addr vaddr)
                  * ThreadContexts associated with this process.
                  */
                 for (auto &cid : _ownerProcess->contextIds) {
-                    ThreadContext *tc =
-                        _ownerProcess->system->getThreadContext(cid);
+                    auto *tc = _ownerProcess->system->threads[cid];
                     SETranslatingPortProxy
                         virt_mem(tc, SETranslatingPortProxy::Always);
                     vma.fillMemPages(vpage_start, _pageBytes, virt_mem);

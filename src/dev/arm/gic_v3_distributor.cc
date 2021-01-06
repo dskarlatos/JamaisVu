@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 ARM Limited
+ * Copyright (c) 2019-2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -74,6 +74,7 @@ Gicv3Distributor::Gicv3Distributor(Gicv3 * gic, uint32_t it_lines)
       irqGroup(it_lines, 0),
       irqEnabled(it_lines, false),
       irqPending(it_lines, false),
+      irqPendingIspendr(it_lines, false),
       irqActive(it_lines, false),
       irqPriority(it_lines, 0xAA),
       irqConfig(it_lines, Gicv3::INT_LEVEL_SENSITIVE),
@@ -608,6 +609,7 @@ Gicv3Distributor::write(Addr addr, uint64_t data, size_t size,
                 DPRINTF(GIC, "Gicv3Distributor::write() (GICD_ISPENDR): "
                         "int_id %d (SPI) pending bit set\n", int_id);
                 irqPending[int_id] = true;
+                irqPendingIspendr[int_id] = true;
             }
         }
 
@@ -634,7 +636,7 @@ Gicv3Distributor::write(Addr addr, uint64_t data, size_t size,
 
             bool clear = data & (1 << i) ? 1 : 0;
 
-            if (clear) {
+            if (clear && treatAsEdgeTriggered(int_id)) {
                 irqPending[int_id] = false;
                 clearIrqCpuInterface(int_id);
             }
@@ -743,6 +745,11 @@ Gicv3Distributor::write(Addr addr, uint64_t data, size_t size,
 
         for (int i = 0, int_id = first_intid; i < 8 * size && int_id < itLines;
              i = i + 2, int_id++) {
+
+            if (nsAccessToSecInt(int_id, is_secure_access)) {
+                continue;
+            }
+
             irqConfig[int_id] = data & (0x2 << i) ?
                                 Gicv3::INT_EDGE_TRIGGERED :
                                 Gicv3::INT_LEVEL_SENSITIVE;
@@ -995,9 +1002,20 @@ Gicv3Distributor::sendInt(uint32_t int_id)
     panic_if(int_id < Gicv3::SGI_MAX + Gicv3::PPI_MAX, "Invalid SPI!");
     panic_if(int_id > itLines, "Invalid SPI!");
     irqPending[int_id] = true;
+    irqPendingIspendr[int_id] = false;
     DPRINTF(GIC, "Gicv3Distributor::sendInt(): "
             "int_id %d (SPI) pending bit set\n", int_id);
     update();
+}
+
+void
+Gicv3Distributor::clearInt(uint32_t int_id)
+{
+    // Edge-triggered interrupts remain pending until software
+    // writes GICD_ICPENDR, GICD_CLRSPI_* or activates them via ICC_IAR
+    if (isLevelSensitive(int_id)) {
+        deassertSPI(int_id);
+    }
 }
 
 void
@@ -1021,7 +1039,7 @@ Gicv3Distributor::route(uint32_t int_id)
 
     if (affinity_routing.IRM) {
         // Interrupts routed to any PE defined as a participating node
-        for (int i = 0; i < gic->getSystem()->numContexts(); i++) {
+        for (int i = 0; i < gic->getSystem()->threads.size(); i++) {
             Gicv3Redistributor * redistributor_i =
                 gic->getRedistributor(i);
 
@@ -1086,7 +1104,7 @@ Gicv3Distributor::update()
     }
 
     // Update all redistributors
-    for (int i = 0; i < gic->getSystem()->numContexts(); i++) {
+    for (int i = 0; i < gic->getSystem()->threads.size(); i++) {
         gic->getRedistributor(i)->update();
     }
 }
@@ -1140,7 +1158,9 @@ Gicv3Distributor::getIntGroup(int int_id) const
 void
 Gicv3Distributor::activateIRQ(uint32_t int_id)
 {
-    irqPending[int_id] = false;
+    if (treatAsEdgeTriggered(int_id)) {
+        irqPending[int_id] = false;
+    }
     irqActive[int_id] = true;
 }
 
@@ -1161,6 +1181,7 @@ Gicv3Distributor::serialize(CheckpointOut & cp) const
     SERIALIZE_CONTAINER(irqGroup);
     SERIALIZE_CONTAINER(irqEnabled);
     SERIALIZE_CONTAINER(irqPending);
+    SERIALIZE_CONTAINER(irqPendingIspendr);
     SERIALIZE_CONTAINER(irqActive);
     SERIALIZE_CONTAINER(irqPriority);
     SERIALIZE_CONTAINER(irqConfig);
@@ -1180,6 +1201,7 @@ Gicv3Distributor::unserialize(CheckpointIn & cp)
     UNSERIALIZE_CONTAINER(irqGroup);
     UNSERIALIZE_CONTAINER(irqEnabled);
     UNSERIALIZE_CONTAINER(irqPending);
+    UNSERIALIZE_CONTAINER(irqPendingIspendr);
     UNSERIALIZE_CONTAINER(irqActive);
     UNSERIALIZE_CONTAINER(irqPriority);
     UNSERIALIZE_CONTAINER(irqConfig);

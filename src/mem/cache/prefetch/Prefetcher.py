@@ -80,7 +80,11 @@ class BasePrefetcher(ClockedObject):
     use_virtual_addresses = Param.Bool(False,
         "Use virtual addresses for prefetching")
 
-    _events = []
+    def __init__(self, **kwargs):
+        super(BasePrefetcher, self).__init__(**kwargs)
+        self._events = []
+        self._tlbs = []
+
     def addEvent(self, newObject):
         self._events.append(newObject)
 
@@ -90,7 +94,7 @@ class BasePrefetcher(ClockedObject):
         for tlb in self._tlbs:
             self.getCCObject().addTLB(tlb.getCCObject())
         for event in self._events:
-           event.register()
+            event.register()
         self.getCCObject().regProbeListeners()
 
     def listenFromProbe(self, simObj, *probeNames):
@@ -99,7 +103,7 @@ class BasePrefetcher(ClockedObject):
         if len(probeNames) <= 0:
             raise TypeError("probeNames must have at least one element")
         self.addEvent(HWPProbeEvent(self, simObj, *probeNames))
-    _tlbs = []
+
     def registerTLB(self, simObj):
         if not isinstance(simObj, SimObject):
             raise TypeError("argument must be a SimObject type")
@@ -159,7 +163,7 @@ class StridePrefetcher(QueuedPrefetcher):
     confidence_threshold = Param.Percent(50,
         "Prefetch generation confidence threshold")
 
-    use_master_id = Param.Bool(True, "Use master id based history")
+    use_requestor_id = Param.Bool(True, "Use requestor id based history")
 
     degree = Param.Int(4, "Number of prefetches to generate")
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Inria
+ * Copyright (c) 2019-2020 Inria
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,48 +37,56 @@
 #include <queue>
 
 #include "base/bitfield.hh"
+#include "base/logging.hh"
+#include "base/trace.hh"
 #include "debug/CacheComp.hh"
 #include "params/MultiCompressor.hh"
 
-MultiCompressor::MultiCompData::MultiCompData(unsigned index,
-    std::unique_ptr<BaseCacheCompressor::CompressionData> comp_data)
+namespace Compressor {
+
+Multi::MultiCompData::MultiCompData(unsigned index,
+    std::unique_ptr<Base::CompressionData> comp_data)
     : CompressionData(), index(index), compData(std::move(comp_data))
 {
     setSizeBits(compData->getSizeBits());
 }
 
 uint8_t
-MultiCompressor::MultiCompData::getIndex() const
+Multi::MultiCompData::getIndex() const
 {
     return index;
 }
 
-MultiCompressor::MultiCompressor(const Params *p)
-    : BaseCacheCompressor(p), compressors(p->compressors)
+Multi::Multi(const Params *p)
+  : Base(p), compressors(p->compressors),
+    numEncodingBits(p->encoding_in_tags ? 0 :
+        std::log2(alignToPowerOfTwo(compressors.size()))),
+    extraDecompressionLatency(p->extra_decomp_lat),
+    multiStats(stats, *this)
 {
     fatal_if(compressors.size() == 0, "There must be at least one compressor");
 }
 
-MultiCompressor::~MultiCompressor()
+Multi::~Multi()
 {
     for (auto& compressor : compressors) {
         delete compressor;
     }
 }
 
-std::unique_ptr<BaseCacheCompressor::CompressionData>
-MultiCompressor::compress(const uint64_t* cache_line, Cycles& comp_lat,
+std::unique_ptr<Base::CompressionData>
+Multi::compress(const std::vector<Chunk>& chunks, Cycles& comp_lat,
     Cycles& decomp_lat)
 {
     struct Results
     {
         unsigned index;
-        std::unique_ptr<BaseCacheCompressor::CompressionData> compData;
+        std::unique_ptr<Base::CompressionData> compData;
         Cycles decompLat;
         uint8_t compressionFactor;
 
         Results(unsigned index,
-            std::unique_ptr<BaseCacheCompressor::CompressionData> comp_data,
+            std::unique_ptr<Base::CompressionData> comp_data,
             Cycles decomp_lat, std::size_t blk_size)
             : index(index), compData(std::move(comp_data)),
               decompLat(decomp_lat)
@@ -86,9 +94,16 @@ MultiCompressor::compress(const uint64_t* cache_line, Cycles& comp_lat,
             const std::size_t size = compData->getSize();
             // If the compressed size is worse than the uncompressed size,
             // we assume the size is the uncompressed size, and thus the
-            // compression factor is 1
+            // compression factor is 1.
+            //
+            // Some compressors (notably the zero compressor) may rely on
+            // extra information being stored in the tags, or added in
+            // another compression layer. Their size can be 0, so it is
+            // assigned the highest possible compression factor (the original
+            // block's size).
             compressionFactor = (size > blk_size) ? 1 :
-                alignToPowerOfTwo(std::floor(blk_size / (double) size));
+                ((size == 0) ? blk_size :
+                alignToPowerOfTwo(std::floor(blk_size / (double) size)));
         }
     };
     struct ResultsComparator
@@ -109,6 +124,12 @@ MultiCompressor::compress(const uint64_t* cache_line, Cycles& comp_lat,
         }
     };
 
+    // Each sub-compressor can have its own chunk size; therefore, revert
+    // the chunks to raw data, so that they handle the conversion internally
+    uint64_t data[blkSize / sizeof(uint64_t)];
+    std::memset(data, 0, blkSize);
+    fromChunks(chunks, data);
+
     // Find the ranking of the compressor outputs
     std::priority_queue<std::shared_ptr<Results>,
         std::vector<std::shared_ptr<Results>>, ResultsComparator> results;
@@ -116,7 +137,9 @@ MultiCompressor::compress(const uint64_t* cache_line, Cycles& comp_lat,
     for (unsigned i = 0; i < compressors.size(); i++) {
         Cycles temp_decomp_lat;
         auto temp_comp_data =
-            compressors[i]->compress(cache_line, comp_lat, temp_decomp_lat);
+            compressors[i]->compress(data, comp_lat, temp_decomp_lat);
+        temp_comp_data->setSizeBits(temp_comp_data->getSizeBits() +
+            numEncodingBits);
         results.push(std::make_shared<Results>(i, std::move(temp_comp_data),
             temp_decomp_lat, blkSize));
         max_comp_lat = std::max(max_comp_lat, comp_lat);
@@ -130,11 +153,11 @@ MultiCompressor::compress(const uint64_t* cache_line, Cycles& comp_lat,
     DPRINTF(CacheComp, "Best compressor: %d\n", best_index);
 
     // Set decompression latency of the best compressor
-    decomp_lat = results.top()->decompLat;
+    decomp_lat = results.top()->decompLat + extraDecompressionLatency;
 
     // Update compressor ranking stats
     for (int rank = 0; rank < compressors.size(); rank++) {
-        rankStats[results.top()->index][rank]++;
+        multiStats.ranks[results.top()->index][rank]++;
         results.pop();
     }
 
@@ -146,7 +169,7 @@ MultiCompressor::compress(const uint64_t* cache_line, Cycles& comp_lat,
 }
 
 void
-MultiCompressor::decompress(const CompressionData* comp_data,
+Multi::decompress(const CompressionData* comp_data,
     uint64_t* cache_line)
 {
     const MultiCompData* casted_comp_data =
@@ -155,29 +178,34 @@ MultiCompressor::decompress(const CompressionData* comp_data,
         casted_comp_data->compData.get(), cache_line);
 }
 
-void
-MultiCompressor::regStats()
+Multi::MultiStats::MultiStats(BaseStats& base_group, Multi& _compressor)
+  : Stats::Group(&base_group), compressor(_compressor),
+    ranks(this, "ranks",
+        "Number of times each compressor had the nth best compression")
 {
-    BaseCacheCompressor::regStats();
+}
 
-    rankStats
-        .init(compressors.size(), compressors.size())
-        .name(name() + ".rank")
-        .desc("Number of times each compressor had the nth best compression.")
-        ;
+void
+Multi::MultiStats::regStats()
+{
+    Stats::Group::regStats();
 
-    for (int compressor = 0; compressor < compressors.size(); compressor++) {
-        rankStats.subname(compressor, std::to_string(compressor));
-        rankStats.subdesc(compressor, "Number of times compressor " +
+    const std::size_t num_compressors = compressor.compressors.size();
+    ranks.init(num_compressors, num_compressors);
+    for (unsigned compressor = 0; compressor < num_compressors; compressor++) {
+        ranks.subname(compressor, std::to_string(compressor));
+        ranks.subdesc(compressor, "Number of times compressor " +
             std::to_string(compressor) + " had the nth best compression.");
-        for (unsigned rank = 0; rank < compressors.size(); rank++) {
-            rankStats.ysubname(rank, std::to_string(rank));
+        for (unsigned rank = 0; rank < num_compressors; rank++) {
+            ranks.ysubname(rank, std::to_string(rank));
         }
     }
 }
 
-MultiCompressor*
+} // namespace Compressor
+
+Compressor::Multi*
 MultiCompressorParams::create()
 {
-    return new MultiCompressor(this);
+    return new Compressor::Multi(this);
 }

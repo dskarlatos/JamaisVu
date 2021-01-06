@@ -47,7 +47,6 @@ from testlib import *
 static_progs = {
     'x86': ('hello64-static', 'hello32-static'),
     'arm': ('hello64-static', 'hello32-static'),
-    'alpha': ('hello',),
     'mips': ('hello',),
     'riscv': ('hello',),
     'sparc': ('hello',)
@@ -60,7 +59,6 @@ dynamic_progs = {
 cpu_types = {
     'x86': ('TimingSimpleCPU', 'AtomicSimpleCPU', 'DerivO3CPU'),
     'arm' :  ('TimingSimpleCPU', 'AtomicSimpleCPU','DerivO3CPU'),
-    'alpha': ('TimingSimpleCPU', 'AtomicSimpleCPU', 'DerivO3CPU', 'MinorCPU'),
     'mips' : ('TimingSimpleCPU', 'AtomicSimpleCPU', 'DerivO3CPU'),
     'riscv' : ('TimingSimpleCPU', 'AtomicSimpleCPU', 'DerivO3CPU', 'MinorCPU'),
     'sparc' : ('TimingSimpleCPU', 'AtomicSimpleCPU')
@@ -69,17 +67,22 @@ cpu_types = {
 supported_os = {
     'x86': ('linux',),
     'arm' : ('linux',),
-    'alpha' : ('linux',),
     'mips' : ('linux',),
     'riscv' : ('linux',),
     'sparc' : ('linux',)
 }
 
-if config.bin_path:
-    base_path = config.bin_path
-else:
-    base_path = joinpath(absdirpath(__file__), '..', 'test-progs', 'hello',
-        'bin')
+# We only want to test x86, arm, and riscv on quick. Mips and sparc will be
+# left for long.
+os_length = {
+    'x86': constants.quick_tag,
+    'arm' : constants.quick_tag,
+    'mips' : constants.long_tag,
+    'riscv' : constants.quick_tag,
+    'sparc' : constants.long_tag,
+}
+
+base_path = joinpath(config.bin_path, 'hello')
 
 urlbase = config.resource_url + '/test-progs/hello/bin/'
 
@@ -102,6 +105,7 @@ def verify_config(isa, binary, operating_s, cpu, hosts):
             '--caches'],
         valid_isas=(isa.upper(),),
         valid_hosts=hosts,
+        length = os_length[isa],
     )
 
 # Run statically linked hello worlds

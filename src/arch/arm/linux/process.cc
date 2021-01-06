@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2013, 2015 ARM Limited
+ * Copyright (c) 2010-2013, 2015, 2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -100,10 +100,9 @@ ArmLinuxObjectFileLoader loader;
 
 /// Target uname() handler.
 static SyscallReturn
-unameFunc32(SyscallDesc *desc, ThreadContext *tc, Addr utsname)
+unameFunc32(SyscallDesc *desc, ThreadContext *tc, VPtr<Linux::utsname> name)
 {
     auto process = tc->getProcessPtr();
-    TypedBufferArg<Linux::utsname> name(utsname);
 
     strcpy(name->sysname, "Linux");
     strcpy(name->nodename, "m5.eecs.umich.edu");
@@ -111,16 +110,14 @@ unameFunc32(SyscallDesc *desc, ThreadContext *tc, Addr utsname)
     strcpy(name->version, "#1 SMP Sat Dec  1 00:00:00 GMT 2012");
     strcpy(name->machine, "armv7l");
 
-    name.copyOut(tc->getVirtProxy());
     return 0;
 }
 
 /// Target uname() handler.
 static SyscallReturn
-unameFunc64(SyscallDesc *desc, ThreadContext *tc, Addr utsname)
+unameFunc64(SyscallDesc *desc, ThreadContext *tc, VPtr<Linux::utsname> name)
 {
     auto process = tc->getProcessPtr();
-    TypedBufferArg<Linux::utsname> name(utsname);
 
     strcpy(name->sysname, "Linux");
     strcpy(name->nodename, "gem5");
@@ -128,7 +125,6 @@ unameFunc64(SyscallDesc *desc, ThreadContext *tc, Addr utsname)
     strcpy(name->version, "#1 SMP Sat Dec  1 00:00:00 GMT 2012");
     strcpy(name->machine, "armv8l");
 
-    name.copyOut(tc->getVirtProxy());
     return 0;
 }
 
@@ -290,14 +286,14 @@ class SyscallTable32 :
         { base + 151, "munlock" },
         { base + 152, "mlockall" },
         { base + 153, "munlockall" },
-        { base + 154, "sched_setparam" },
-        { base + 155, "sched_getparam" },
-        { base + 156, "sched_setscheduler" },
-        { base + 157, "sched_getscheduler" },
-        { base + 158, "sched_yield" },
-        { base + 159, "sched_get_priority_max" },
-        { base + 160, "sched_get_priority_min" },
-        { base + 161, "sched_rr_get_interval" },
+        { base + 154, "sched_setparam", ignoreWarnOnceFunc },
+        { base + 155, "sched_getparam", ignoreWarnOnceFunc },
+        { base + 156, "sched_setscheduler", ignoreWarnOnceFunc },
+        { base + 157, "sched_getscheduler", ignoreWarnOnceFunc },
+        { base + 158, "sched_yield", ignoreWarnOnceFunc },
+        { base + 159, "sched_get_priority_max", ignoreWarnOnceFunc },
+        { base + 160, "sched_get_priority_min", ignoreWarnOnceFunc },
+        { base + 161, "sched_rr_get_interval", ignoreWarnOnceFunc },
         { base + 162, "nanosleep", ignoreWarnOnceFunc },
         { base + 163, "mremap", mremapFunc<ArmLinux32> }, // ARM-specific
         { base + 164, "setresuid" },
@@ -375,7 +371,7 @@ class SyscallTable32 :
         { base + 238, "tkill" },
         { base + 239, "sendfile64" },
         { base + 240, "futex", futexFunc<ArmLinux32> },
-        { base + 241, "sched_setaffinity" },
+        { base + 241, "sched_setaffinity", ignoreWarnOnceFunc },
         { base + 242, "sched_getaffinity", ignoreFunc },
         { base + 243, "io_setup" },
         { base + 244, "io_destroy" },
@@ -476,7 +472,7 @@ class SyscallTable32 :
         { base + 342, "tee" },
         { base + 343, "vmsplice" },
         { base + 344, "move_pages" },
-        { base + 345, "getcpu" },
+        { base + 345, "getcpu", getcpuFunc },
         { base + 346, "epoll_pwait" },
         { base + 347, "sys_kexec_load" },
         { base + 348, "sys_utimensat" },
@@ -631,16 +627,16 @@ class SyscallTable64 :
         {  base + 115, "clock_nanosleep" },
         {  base + 116, "syslog" },
         {  base + 117, "ptrace" },
-        {  base + 118, "sched_setparam" },
-        {  base + 119, "sched_setscheduler" },
-        {  base + 120, "sched_getscheduler" },
-        {  base + 121, "sched_getparam" },
-        {  base + 122, "sched_setaffinity" },
+        {  base + 118, "sched_setparam", ignoreWarnOnceFunc },
+        {  base + 119, "sched_setscheduler", ignoreWarnOnceFunc },
+        {  base + 120, "sched_getscheduler", ignoreWarnOnceFunc },
+        {  base + 121, "sched_getparam", ignoreWarnOnceFunc },
+        {  base + 122, "sched_setaffinity", ignoreWarnOnceFunc },
         {  base + 123, "sched_getaffinity", ignoreFunc },
-        {  base + 124, "sched_yield" },
-        {  base + 125, "sched_get_priority_max" },
-        {  base + 126, "sched_get_priority_min" },
-        {  base + 127, "sched_rr_get_interval" },
+        {  base + 124, "sched_yield", ignoreWarnOnceFunc },
+        {  base + 125, "sched_get_priority_max", ignoreWarnOnceFunc },
+        {  base + 126, "sched_get_priority_min", ignoreWarnOnceFunc },
+        {  base + 127, "sched_rr_get_interval", ignoreWarnOnceFunc },
         {  base + 128, "restart_syscall" },
         {  base + 129, "kill", ignoreFunc },
         {  base + 130, "tkill" },
@@ -681,7 +677,7 @@ class SyscallTable64 :
         {  base + 165, "getrusage", getrusageFunc<ArmLinux64> },
         {  base + 166, "umask" },
         {  base + 167, "prctl" },
-        {  base + 168, "getcpu" },
+        {  base + 168, "getcpu", getcpuFunc },
         {  base + 169, "gettimeofday", gettimeofdayFunc<ArmLinux64> },
         {  base + 170, "settimeofday" },
         {  base + 171, "adjtimex" },
@@ -866,7 +862,7 @@ ArmLinuxProcess32::initState()
 {
     ArmProcess32::initState();
     allocateMem(commPage, PageBytes);
-    ThreadContext *tc = system->getThreadContext(contextIds[0]);
+    ThreadContext *tc = system->threads[contextIds[0]];
 
     uint8_t swiNeg1[] = {
         0xff, 0xff, 0xff, 0xef  // swi -1
@@ -916,9 +912,9 @@ ArmLinuxProcess64::initState()
 }
 
 void
-ArmLinuxProcess32::syscall(ThreadContext *tc, Fault *fault)
+ArmLinuxProcess32::syscall(ThreadContext *tc)
 {
-    ArmProcess32::syscall(tc, fault);
+    ArmProcess32::syscall(tc);
 
     int num = tc->readIntReg(INTREG_R7);
     SyscallDesc *desc = syscallDescs32Low.get(num, false);
@@ -926,13 +922,13 @@ ArmLinuxProcess32::syscall(ThreadContext *tc, Fault *fault)
         desc = syscallDescs32Low.get(num, false);
     if (!desc)
         desc = privSyscallDescs32.get(num);
-    desc->doSyscall(tc, fault);
+    desc->doSyscall(tc);
 }
 
 void
-ArmLinuxProcess64::syscall(ThreadContext *tc, Fault *fault)
+ArmLinuxProcess64::syscall(ThreadContext *tc)
 {
-    ArmProcess64::syscall(tc, fault);
+    ArmProcess64::syscall(tc);
 
     int num = tc->readIntReg(INTREG_X8);
     SyscallDesc *desc = syscallDescs64Low.get(num, false);
@@ -940,5 +936,5 @@ ArmLinuxProcess64::syscall(ThreadContext *tc, Fault *fault)
         desc = syscallDescs64Low.get(num, false);
     if (!desc)
         desc = privSyscallDescs64.get(num);
-    desc->doSyscall(tc, fault);
+    desc->doSyscall(tc);
 }

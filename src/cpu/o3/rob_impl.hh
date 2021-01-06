@@ -60,7 +60,9 @@ ROB<Impl>::ROB(O3CPU *_cpu, DerivO3CPUParams *params)
       numEntries(params->numROBEntries),
       squashWidth(params->squashWidth),
       numInstsInROB(0),
-      numThreads(params->numThreads) {
+      numThreads(params->numThreads),
+      stats(_cpu)
+{
     //Figure out rob policy
     if (robPolicy == SMTQueuePolicy::Dynamic) {
         //Set Max Entries to Total ROB Capacity
@@ -189,7 +191,7 @@ template <class Impl>
 void ROB<Impl>::insertInst(const DynInstPtr &inst) {
     assert(inst);
 
-    robWrites++;
+    stats.writes++;
 
     DPRINTF(ROB, "Adding inst PC %s to the ROB.\n", inst->pcState());
 
@@ -221,8 +223,10 @@ void ROB<Impl>::insertInst(const DynInstPtr &inst) {
 }
 
 template <class Impl>
-void ROB<Impl>::retireHead(ThreadID tid) {
-    robWrites++;
+void
+ROB<Impl>::retireHead(ThreadID tid)
+{
+    stats.writes++;
 
     assert(numInstsInROB > 0);
 
@@ -256,8 +260,10 @@ void ROB<Impl>::retireHead(ThreadID tid) {
 }
 
 template <class Impl>
-bool ROB<Impl>::isHeadReady(ThreadID tid) {
-    robReads++;
+bool
+ROB<Impl>::isHeadReady(ThreadID tid)
+{
+    stats.reads++;
     if (threadEntries[tid] != 0) {
         return instList[tid].front()->readyToCommit();
     }
@@ -295,8 +301,10 @@ ROB<Impl>::numFreeEntries(ThreadID tid) {
 }
 
 template <class Impl>
-void ROB<Impl>::doSquash(ThreadID tid) {
-    robWrites++;
+void
+ROB<Impl>::doSquash(ThreadID tid)
+{
+    stats.writes++;
     DPRINTF(ROB, "[tid:%i] Squashing instructions until [sn:%llu].\n",
             tid, squashedSeqNum[tid]);
 
@@ -333,7 +341,7 @@ void ROB<Impl>::doSquash(ThreadID tid) {
         (*squashIt[tid])->setCanCommit();
 
         if ((*squashIt[tid])->numReplays() > squashBefore) {
-            ++robSquashSet;
+            ++stats.robSquashSet;
         }
 
         if (squashIt[tid] == instList[tid].begin()) {
@@ -476,9 +484,9 @@ void ROB<Impl>::updateVPStatus() {
                     if (CChit && !inst->isReplayed()) {
                         inst->liftFence();
                         inst->needFetchCC = false;
-                        ++robCCMissZeroFences;
+                        ++stats.robCCMissZeroFences;
                     } else if (CChit && inst->isReplayed()) {
-                        ++robCCMissNonZeroFences;
+                        ++stats.robCCMissNonZeroFences;
                         inst->needFetchCC = false;
                     }
                 }
@@ -581,27 +589,16 @@ ROB<Impl>::readTailInst(ThreadID tid) {
 }
 
 template <class Impl>
-void ROB<Impl>::regStats() {
-    using namespace Stats;
-    robReads
-        .name(name() + ".rob_reads")
-        .desc("The number of ROB reads");
-
-    robWrites
-        .name(name() + ".rob_writes")
-        .desc("The number of ROB writes");
-
-    robSquashSet
-        .name(name() + ".squashSet")
-        .desc("Number of times squash was set in ROB");
-
-    robCCMissZeroFences
-        .name(name() + ".robCCMissZeroFences")
-        .desc("Number of times Counter Cache miss with zero counter in ROB");
-
-    robCCMissNonZeroFences
-        .name(name() + ".robCCMissNonZeroFences")
-        .desc("Number of times Counter Cache miss with non zero counter in ROB");
+ROB<Impl>::ROBStats::ROBStats(Stats::Group *parent)
+    : Stats::Group(parent, "rob"),
+      ADD_STAT(reads, "The number of ROB reads"),
+      ADD_STAT(writes, "The number of ROB writes"),
+      ADD_STAT(robSquashSet, "Number of times squash was set in ROB"),
+      ADD_STAT(robCCMissZeroFences,
+               "Number of times Counter Cache miss with zero counter in ROB"),
+      ADD_STAT(robCCMissNonZeroFences,
+               "Number of times Counter Cache miss with non zero counter in ROB")
+{
 }
 
 template <class Impl>

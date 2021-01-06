@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Inria
+ * Copyright (c) 2019-2020 Inria
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,6 +37,8 @@
 #include "mem/cache/compressors/base_delta.hh"
 #include "mem/cache/compressors/dictionary_compressor_impl.hh"
 
+namespace Compressor {
+
 template <class BaseType, std::size_t DeltaSizeBits>
 BaseDelta<BaseType, DeltaSizeBits>::BaseDelta(const Params *p)
     : DictionaryCompressor<BaseType>(p)
@@ -64,12 +66,13 @@ BaseDelta<BaseType, DeltaSizeBits>::addToDictionary(DictionaryEntry data)
 }
 
 template <class BaseType, std::size_t DeltaSizeBits>
-std::unique_ptr<BaseCacheCompressor::CompressionData>
-BaseDelta<BaseType, DeltaSizeBits>::compress(const uint64_t* data,
-    Cycles& comp_lat, Cycles& decomp_lat)
+std::unique_ptr<Base::CompressionData>
+BaseDelta<BaseType, DeltaSizeBits>::compress(
+    const std::vector<Base::Chunk>& chunks, Cycles& comp_lat,
+    Cycles& decomp_lat)
 {
-    std::unique_ptr<BaseCacheCompressor::CompressionData> comp_data =
-        DictionaryCompressor<BaseType>::compress(data);
+    std::unique_ptr<Base::CompressionData> comp_data =
+        DictionaryCompressor<BaseType>::compress(chunks);
 
     // If there are more bases than the maximum, the compressor failed.
     // Otherwise, we have to take into account all bases that have not
@@ -97,5 +100,7 @@ BaseDelta<BaseType, DeltaSizeBits>::compress(const uint64_t* data,
     // Return compressed line
     return comp_data;
 }
+
+} // namespace Compressor
 
 #endif //__MEM_CACHE_COMPRESSORS_BASE_DELTA_IMPL_HH__

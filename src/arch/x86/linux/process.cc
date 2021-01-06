@@ -89,18 +89,15 @@ X86LinuxObjectFileLoader loader;
 
 /// Target uname() handler.
 static SyscallReturn
-unameFunc(SyscallDesc *desc, ThreadContext *tc, Addr utsname)
+unameFunc(SyscallDesc *desc, ThreadContext *tc, VPtr<Linux::utsname> name)
 {
     auto process = tc->getProcessPtr();
-    TypedBufferArg<Linux::utsname> name(utsname);
 
     strcpy(name->sysname, "Linux");
     strcpy(name->nodename, "sim.gem5.org");
     strcpy(name->release, process->release.c_str());
     strcpy(name->version, "#1 Mon Aug 18 11:32:15 EDT 2003");
     strcpy(name->machine, "x86_64");
-
-    name.copyOut(tc->getVirtProxy());
 
     return 0;
 }
@@ -167,7 +164,8 @@ struct UserDesc64 {
 };
 
 static SyscallReturn
-setThreadArea32Func(SyscallDesc *desc, ThreadContext *tc, Addr userDescPtr)
+setThreadArea32Func(SyscallDesc *desc, ThreadContext *tc,
+                    VPtr<UserDesc32> userDesc)
 {
     const int minTLSEntry = 6;
     const int numTLSEntries = 3;
@@ -180,13 +178,9 @@ setThreadArea32Func(SyscallDesc *desc, ThreadContext *tc, Addr userDescPtr)
 
     assert((maxTLSEntry + 1) * sizeof(uint64_t) <= x86p->gdtSize());
 
-    TypedBufferArg<UserDesc32> userDesc(userDescPtr);
     TypedBufferArg<uint64_t>
         gdt(x86p->gdtStart() + minTLSEntry * sizeof(uint64_t),
             numTLSEntries * sizeof(uint64_t));
-
-    if (!userDesc.copyIn(tc->getVirtProxy()))
-        return -EFAULT;
 
     if (!gdt.copyIn(tc->getVirtProxy()))
         panic("Failed to copy in GDT for %s.\n", desc->name());
@@ -240,8 +234,6 @@ setThreadArea32Func(SyscallDesc *desc, ThreadContext *tc, Addr userDescPtr)
 
     gdt[index] = (uint64_t)segDesc;
 
-    if (!userDesc.copyOut(tc->getVirtProxy()))
-        return -EFAULT;
     if (!gdt.copyOut(tc->getVirtProxy()))
         panic("Failed to copy out GDT for %s.\n", desc->name());
 
@@ -347,7 +339,7 @@ static SyscallDescTable<X86_64LinuxProcess::SyscallABI> syscallDescs64 = {
     {  87, "unlink", unlinkFunc },
     {  88, "symlink", symlinkFunc },
     {  89, "readlink", readlinkFunc },
-    {  90, "chmod" },
+    {  90, "chmod", ignoreFunc },
     {  91, "fchmod" },
     {  92, "chown" },
     {  93, "fchown" },
@@ -460,7 +452,7 @@ static SyscallDescTable<X86_64LinuxProcess::SyscallABI> syscallDescs64 = {
     { 200, "tkill" },
     { 201, "time", timeFunc<X86Linux64> },
     { 202, "futex", futexFunc<X86Linux64> },
-    { 203, "sched_setaffinity" },
+    { 203, "sched_setaffinity", ignoreFunc },
     { 204, "sched_getaffinity", ignoreFunc },
     { 205, "set_thread_area" },
     { 206, "io_setup" },
@@ -566,7 +558,7 @@ static SyscallDescTable<X86_64LinuxProcess::SyscallABI> syscallDescs64 = {
     { 306, "syncfs" },
     { 307, "sendmmsg" },
     { 308, "setns" },
-    { 309, "getcpu" },
+    { 309, "getcpu", getcpuFunc },
     { 310, "proess_vm_readv" },
     { 311, "proess_vm_writev" },
     { 312, "kcmp" },
@@ -574,10 +566,10 @@ static SyscallDescTable<X86_64LinuxProcess::SyscallABI> syscallDescs64 = {
 };
 
 void
-X86_64LinuxProcess::syscall(ThreadContext *tc, Fault *fault)
+X86_64LinuxProcess::syscall(ThreadContext *tc)
 {
-    X86_64Process::syscall(tc, fault);
-    syscallDescs64.get(tc->readIntReg(INTREG_RAX))->doSyscall(tc, fault);
+    X86_64Process::syscall(tc);
+    syscallDescs64.get(tc->readIntReg(INTREG_RAX))->doSyscall(tc);
 }
 
 void
@@ -837,7 +829,7 @@ static SyscallDescTable<I386LinuxProcess::SyscallABI> syscallDescs32 = {
     { 238, "tkill" },
     { 239, "sendfile64" },
     { 240, "futex" },
-    { 241, "sched_setaffinity" },
+    { 241, "sched_setaffinity", ignoreFunc },
     { 242, "sched_getaffinity", ignoreFunc },
     { 243, "set_thread_area", setThreadArea32Func },
     { 244, "get_thread_area" },
@@ -914,7 +906,7 @@ static SyscallDescTable<I386LinuxProcess::SyscallABI> syscallDescs32 = {
     { 315, "tee" },
     { 316, "vmsplice" },
     { 317, "move_pages" },
-    { 318, "getcpu" },
+    { 318, "getcpu", getcpuFunc },
     { 319, "epoll_pwait" },
     { 320, "utimensat" },
     { 321, "signalfd" },
@@ -923,9 +915,9 @@ static SyscallDescTable<I386LinuxProcess::SyscallABI> syscallDescs32 = {
 };
 
 void
-I386LinuxProcess::syscall(ThreadContext *tc, Fault *fault)
+I386LinuxProcess::syscall(ThreadContext *tc)
 {
-    I386Process::syscall(tc, fault);
+    I386Process::syscall(tc);
     PCState pc = tc->pcState();
     Addr eip = pc.pc();
     if (eip >= vsyscallPage.base &&
@@ -933,7 +925,7 @@ I386LinuxProcess::syscall(ThreadContext *tc, Fault *fault)
         pc.npc(vsyscallPage.base + vsyscallPage.vsysexitOffset);
         tc->pcState(pc);
     }
-    syscallDescs32.get(tc->readIntReg(INTREG_RAX))->doSyscall(tc, fault);
+    syscallDescs32.get(tc->readIntReg(INTREG_RAX))->doSyscall(tc);
 }
 
 void

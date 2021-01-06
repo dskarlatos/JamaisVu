@@ -171,8 +171,8 @@ class MySystem(System):
 
     def _createMemoryControllers(self, num, cls):
         self.mem_cntrls = [
-            cls(range = self.mem_ranges[0],
-                port = self.membus.master)
+            MemCtrl(dram = cls(range = self.mem_ranges[0]),
+                    port = self.membus.master)
             for i in range(num)
         ]
 
@@ -318,7 +318,7 @@ class MySystem(System):
 class CowDisk(IdeDisk):
     def __init__(self, filename):
         super(CowDisk, self).__init__()
-        self.driveID = 'master'
+        self.driveID = 'device0'
         self.image = CowDiskImage(child=RawDiskImage(read_only=True),
                                   read_only=False)
         self.image.child.image_file = filename

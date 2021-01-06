@@ -170,10 +170,10 @@ MipsProcess::argsInit(int pageSize)
     initVirtMem->writeBlob(memState->getStackMin(), &argc, intSize);
 
     copyStringArray(argv, argv_array_base, arg_data_base,
-                    LittleEndianByteOrder, *initVirtMem);
+                    ByteOrder::little, *initVirtMem);
 
     copyStringArray(envp, envp_array_base, env_data_base,
-                    LittleEndianByteOrder, *initVirtMem);
+                    ByteOrder::little, *initVirtMem);
 
     // Fix up the aux vectors which point to data.
     for (auto &aux: auxv) {
@@ -193,7 +193,7 @@ MipsProcess::argsInit(int pageSize)
     initVirtMem->write(auxv_array_end, zero);
     auxv_array_end += sizeof(zero);
 
-    ThreadContext *tc = system->getThreadContext(contextIds[0]);
+    ThreadContext *tc = system->threads[contextIds[0]];
 
     tc->setIntReg(FirstArgumentReg, argc);
     tc->setIntReg(FirstArgumentReg + 1, argv_array_base);

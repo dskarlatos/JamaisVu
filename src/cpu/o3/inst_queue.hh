@@ -244,9 +244,6 @@ class InstructionQueue
     /** Replays a memory instruction. It must be rescheduled first. */
     void replayMemInst(const DynInstPtr &replay_inst);
 
-    /** Completes a memory operation. */
-    void completeMemInst(const DynInstPtr &completed_inst);
-
     /**
      * Defers a memory instruction when its DTB translation incurs a hw
      * page table walk.

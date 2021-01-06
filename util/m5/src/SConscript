@@ -27,49 +27,70 @@ import os
 
 Import('*')
 
+env.Append(CPPPATH=Dir('.'))
+
 # Raw source files.
+args = 'args.cc'
+call_type = 'call_type.cc'
+command = 'command.cc'
+m5 = 'm5.cc'
 m5_mmap = 'm5_mmap.c'
-m5 = 'm5.c'
+usage = 'usage.cc'
+
 jni = 'jni_gem5Op.c'
-lua = 'lua_gem5Op.c'
+lua = 'lua_gem5Op.cc'
 
 all_call_types = list(env['CALL_TYPE'].values())
 call_types = list([ ct for ct in all_call_types if ct.enabled ])
-m5ops = list([ '${VARIANT}/%s' % ct.impl_file for ct in call_types ])
+m5ops = { ct.name: 'abi/${ABI}/%s' % ct.impl_file
+          for ct in call_types }
+all_m5ops = list(m5ops.values())
 
 default_call_type = list([ ct for ct in call_types if ct.default ])
 assert len(default_call_type) == 1, \
         'There should be exactly one default call type for %s, found %d' % \
-        (env['VARIANT'], len(default_call_type))
+        (env['ABI'], len(default_call_type))
 default_call_type = default_call_type[0]
 
 static_env = env.Clone()
 static_env.Append(LINKFLAGS=[ '-no-pie', '-static' ])
 
-for ct in all_call_types:
-    static_env.Append(CFLAGS='-DENABLE_CT_%s=%d' %
-                (ct.name, 1 if ct.enabled else 0))
-    static_env.Append(CFLAGS='-DDEFAULT_CT_%s=%d' %
-                (ct.name, 1 if ct.default else 0))
-static_env.Append(CFLAGS='-DDEFAULT_CALL_TYPE=%s' % default_call_type.name)
-
 #
 # The m5 library for use in other C/C++ programs.
 #
-libm5 = static_env.StaticLibrary('out/m5', [ m5_mmap ] + m5ops)
+libm5 = static_env.StaticLibrary('out/m5', [ m5_mmap ] + all_m5ops)
 
+commands = env.SConscript('command/SConscript', exports={ "env": static_env })
 
 #
 # The m5 stand alone command line utility.
 #
-ct_support = list([ File('%s_call_type.c' % ct.name) for ct in call_types ])
-m5_bin = static_env.Program('out/m5', ct_support + [ m5, m5_mmap, libm5 ])
+ct_support = []
+for ct in call_types:
+    ct_env = ct.setup_env(static_env)
+    ct_support.extend(ct_env.StaticObject('call_type/%s.cc' % ct.name))
+m5_bin = static_env.Program('out/m5', ct_support +
+        [ args, call_type, command, commands, m5, m5_mmap, libm5, usage ])
 
 
 # The shared version of the m5 op call sights, used by mutliple targets below.
 shared_env = env.Clone()
 shared_env.Append(ASFLAGS='-DM5OP_PIC')
-m5op_shared = shared_env.SharedObject(m5ops)
+m5op_shared = shared_env.SharedObject(all_m5ops)
+
+#
+# Unit tests for enabled call types.
+#
+call_type_shared = shared_env.SharedObject(call_type)
+args_shared = shared_env.SharedObject(args)
+m5_mmap_shared = shared_env.SharedObject(m5_mmap)
+for ct in call_types:
+    ct_env = ct.setup_env(shared_env, allow_default=False)
+    srcs = [ 'call_type/%s.test.cc' % ct.name, 'call_type/%s.cc' % ct.name,
+             call_type_shared, args_shared, m5_mmap_shared, m5ops[ct.name] ]
+    if ct.verifier:
+        srcs.append('abi/${ABI}/%s' % ct.verifier)
+    ct_env.GTest('call_type/%s' % ct.name, *srcs)
 
 if env['HAVE_JAVA']:
     #
@@ -99,4 +120,4 @@ if env['HAVE_LUA51']:
     # Extract the include paths needed for lua51 using pkg-config.
     lua_env.ParseConfig('pkg-config --cflags lua51')
     lib = lua_env.SharedLibrary('out/gem5OpLua',
-                                [ lua, m5_mmap ] + m5op_shared)
+                                [ lua, m5_mmap_shared ] + m5op_shared)

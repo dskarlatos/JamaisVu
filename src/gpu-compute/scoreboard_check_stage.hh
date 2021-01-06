@@ -36,19 +36,17 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "sim/stats.hh"
+
 class ComputeUnit;
+class ScoreboardCheckToSchedule;
 class Wavefront;
 
 struct ComputeUnitParams;
-
-enum WAVE_STATUS
-{
-    BLOCKED = 0,
-    READY
-};
 
 /*
  * Scoreboard check stage.
@@ -61,9 +59,21 @@ enum WAVE_STATUS
 class ScoreboardCheckStage
 {
   public:
-    ScoreboardCheckStage(const ComputeUnitParams* params);
+    enum nonrdytype_e {
+        NRDY_ILLEGAL,
+        NRDY_WF_STOP,
+        NRDY_IB_EMPTY,
+        NRDY_WAIT_CNT,
+        NRDY_BARRIER_WAIT,
+        NRDY_VGPR_NRDY,
+        NRDY_SGPR_NRDY,
+        INST_RDY,
+        NRDY_CONDITIONS
+    };
+
+    ScoreboardCheckStage(const ComputeUnitParams* p, ComputeUnit &cu,
+                         ScoreboardCheckToSchedule &to_schedule);
     ~ScoreboardCheckStage();
-    void init(ComputeUnit *cu);
     void exec();
 
     // Stats related variables and methods
@@ -71,33 +81,23 @@ class ScoreboardCheckStage
     void regStats();
 
   private:
-    void collectStatistics(Wavefront *curWave, int unitId);
-    void initStatistics();
-    ComputeUnit *computeUnit;
-    uint32_t numSIMDs;
-    uint32_t numMemUnits;
-    uint32_t numShrMemPipes;
+    void collectStatistics(nonrdytype_e rdyStatus);
+    int mapWaveToExeUnit(Wavefront *w);
+    bool ready(Wavefront *w, nonrdytype_e *rdyStatus,
+               int *exeResType, int wfSlot);
+    ComputeUnit &computeUnit;
 
-    // flag per vector SIMD unit that is set when there is at least one
-    // WF that has a vector ALU instruction as the oldest in its
-    // Instruction Buffer
-    std::vector<bool> *vectorAluInstAvail;
-    int lastGlbMemSimd;
-    int lastShrMemSimd;
+    /**
+     * Interface between scoreboard check and schedule stages. Each
+     * cycle the scoreboard check stage populates this interface with
+     * information needed by the schedule stage.
+     */
+    ScoreboardCheckToSchedule &toSchedule;
 
-    int *glbMemInstAvail;
-    int *shrMemInstAvail;
-    // List of waves which are ready to be scheduled.
-    // Each execution resource has a ready list
-    std::vector<std::vector<Wavefront*>*> readyList;
+    // Stats
+    Stats::Vector stallCycles;
 
-    // Stores the status of waves. A READY implies the
-    // wave is ready to be scheduled this cycle and
-    // is already present in the readyList
-    std::vector<std::vector<std::pair<Wavefront*, WAVE_STATUS>>*>
-        waveStatusList;
-
-    std::string _name;
+    const std::string _name;
 };
 
 #endif // __SCOREBOARD_CHECK_STAGE_HH__

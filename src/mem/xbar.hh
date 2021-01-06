@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2015, 2018-2019 ARM Limited
+ * Copyright (c) 2011-2015, 2018-2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -79,10 +79,10 @@ class BaseXBar : public ClockedObject
      * PCIe, etc.
      *
      * The template parameter, PortClass, indicates the destination
-     * port type for the layer. The retry list holds either master
-     * ports or slave ports, depending on the direction of the
-     * layer. Thus, a request layer has a retry list containing slave
-     * ports, whereas a response layer holds master ports.
+     * port type for the layer. The retry list holds either memory-side ports
+     * or CPU-side ports, depending on the direction of the
+     * layer. Thus, a request layer has a retry list containing
+     * CPU-side ports, whereas a response layer holds memory-side ports.
      */
     template <typename SrcType, typename DstType>
     class Layer : public Drainable, public Stats::Group
@@ -165,7 +165,7 @@ class BaseXBar : public ClockedObject
 
         /**
          * Sending the actual retry, in a manner specific to the
-         * individual layers. Note that for a MasterPort, there is
+         * individual layers. Note that for a RequestPort, there is
          * both a RequestLayer and a SnoopResponseLayer using the same
          * port, but using different functions for the flow control.
          */
@@ -231,7 +231,7 @@ class BaseXBar : public ClockedObject
 
     };
 
-    class ReqLayer : public Layer<SlavePort, MasterPort>
+    class ReqLayer : public Layer<ResponsePort, RequestPort>
     {
       public:
         /**
@@ -241,19 +241,20 @@ class BaseXBar : public ClockedObject
          * @param _xbar the crossbar this layer belongs to
          * @param _name the layer's name
          */
-        ReqLayer(MasterPort& _port, BaseXBar& _xbar, const std::string& _name) :
+        ReqLayer(RequestPort& _port, BaseXBar& _xbar,
+        const std::string& _name) :
             Layer(_port, _xbar, _name)
         {}
 
       protected:
         void
-        sendRetry(SlavePort* retry_port) override
+        sendRetry(ResponsePort* retry_port) override
         {
             retry_port->sendRetryReq();
         }
     };
 
-    class RespLayer : public Layer<MasterPort, SlavePort>
+    class RespLayer : public Layer<RequestPort, ResponsePort>
     {
       public:
         /**
@@ -263,20 +264,20 @@ class BaseXBar : public ClockedObject
          * @param _xbar the crossbar this layer belongs to
          * @param _name the layer's name
          */
-        RespLayer(SlavePort& _port, BaseXBar& _xbar,
+        RespLayer(ResponsePort& _port, BaseXBar& _xbar,
                   const std::string& _name) :
             Layer(_port, _xbar, _name)
         {}
 
       protected:
         void
-        sendRetry(MasterPort* retry_port) override
+        sendRetry(RequestPort* retry_port) override
         {
             retry_port->sendRetryResp();
         }
     };
 
-    class SnoopRespLayer : public Layer<SlavePort, MasterPort>
+    class SnoopRespLayer : public Layer<ResponsePort, RequestPort>
     {
       public:
         /**
@@ -286,7 +287,7 @@ class BaseXBar : public ClockedObject
          * @param _xbar the crossbar this layer belongs to
          * @param _name the layer's name
          */
-        SnoopRespLayer(MasterPort& _port, BaseXBar& _xbar,
+        SnoopRespLayer(RequestPort& _port, BaseXBar& _xbar,
                        const std::string& _name) :
             Layer(_port, _xbar, _name)
         {}
@@ -294,7 +295,7 @@ class BaseXBar : public ClockedObject
       protected:
 
         void
-        sendRetry(SlavePort* retry_port) override
+        sendRetry(ResponsePort* retry_port) override
         {
             retry_port->sendRetrySnoopResp();
         }
@@ -307,6 +308,8 @@ class BaseXBar : public ClockedObject
     const Cycles frontendLatency;
     const Cycles forwardLatency;
     const Cycles responseLatency;
+    /** Cycles the layer is occupied processing the packet header */
+    const Cycles headerLatency;
     /** the width of the xbar in bytes */
     const uint32_t width;
 
@@ -329,9 +332,9 @@ class BaseXBar : public ClockedObject
      * Function called by the port when the crossbar is recieving a
      * range change.
      *
-     * @param master_port_id id of the port that received the change
+     * @param mem_side_port_id id of the port that received the change
      */
-    virtual void recvRangeChange(PortID master_port_id);
+    virtual void recvRangeChange(PortID mem_side_port_id);
 
     /**
      * Find which port connected to this crossbar (if any) should be
@@ -361,17 +364,17 @@ class BaseXBar : public ClockedObject
     void calcPacketTiming(PacketPtr pkt, Tick header_delay);
 
     /**
-     * Remember for each of the master ports of the crossbar if we got
-     * an address range from the connected slave. For convenience,
-     * also keep track of if we got ranges from all the slave modules
+     * Remember for each of the memory-side ports of the crossbar if we got
+     * an address range from the connected CPU-side ports. For convenience,
+     * also keep track of if we got ranges from all the CPU-side-port modules
      * or not.
      */
     std::vector<bool> gotAddrRanges;
     bool gotAllAddrRanges;
 
-    /** The master and slave ports of the crossbar */
-    std::vector<QueuedSlavePort*> slavePorts;
-    std::vector<MasterPort*> masterPorts;
+    /** The memory-side ports and CPU-side ports of the crossbar */
+    std::vector<QueuedResponsePort*> cpuSidePorts;
+    std::vector<RequestPort*> memSidePorts;
 
     /** Port that handles requests that don't match any of the interfaces.*/
     PortID defaultPortID;
@@ -389,9 +392,9 @@ class BaseXBar : public ClockedObject
      * crossbar. The transaction distribution is globally counting
      * different types of commands. The packet count and total packet
      * size are two-dimensional vectors that are indexed by the
-     * slave port and master port id (thus the neighbouring master and
-     * neighbouring slave), summing up both directions (request and
-     * response).
+     * CPU-side port and memory-side port id (thus the neighbouring memory-side
+     * ports and neighbouring CPU-side ports), summing up both directions
+     * (request and response).
      */
     Stats::Vector transDist;
     Stats::Vector2d pktCount;

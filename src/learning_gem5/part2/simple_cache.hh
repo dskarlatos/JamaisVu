@@ -51,7 +51,7 @@ class SimpleCache : public ClockedObject
      * Port on the CPU-side that receives requests.
      * Mostly just forwards requests to the cache (owner)
      */
-    class CPUSidePort : public SlavePort
+    class CPUSidePort : public ResponsePort
     {
       private:
         /// Since this is a vector port, need to know what number this one is
@@ -71,7 +71,7 @@ class SimpleCache : public ClockedObject
          * Constructor. Just calls the superclass constructor.
          */
         CPUSidePort(const std::string& name, int id, SimpleCache *owner) :
-            SlavePort(name, owner), id(id), owner(owner), needRetry(false),
+            ResponsePort(name, owner), id(id), owner(owner), needRetry(false),
             blockedPacket(nullptr)
         { }
 
@@ -86,7 +86,7 @@ class SimpleCache : public ClockedObject
 
         /**
          * Get a list of the non-overlapping address ranges the owner is
-         * responsible for. All slave ports must override this function
+         * responsible for. All response ports must override this function
          * and return a populated list with at least one item.
          *
          * @return a list of ranges responded to
@@ -101,14 +101,14 @@ class SimpleCache : public ClockedObject
 
       protected:
         /**
-         * Receive an atomic request packet from the master port.
+         * Receive an atomic request packet from the request port.
          * No need to implement in this simple cache.
          */
         Tick recvAtomic(PacketPtr pkt) override
         { panic("recvAtomic unimpl."); }
 
         /**
-         * Receive a functional request packet from the master port.
+         * Receive a functional request packet from the request port.
          * Performs a "debug" access updating/reading the data in place.
          *
          * @param packet the requestor sent.
@@ -116,7 +116,7 @@ class SimpleCache : public ClockedObject
         void recvFunctional(PacketPtr pkt) override;
 
         /**
-         * Receive a timing request from the master port.
+         * Receive a timing request from the request port.
          *
          * @param the packet that the requestor sent
          * @return whether this object can consume to packet. If false, we
@@ -126,9 +126,9 @@ class SimpleCache : public ClockedObject
         bool recvTimingReq(PacketPtr pkt) override;
 
         /**
-         * Called by the master port if sendTimingResp was called on this
-         * slave port (causing recvTimingResp to be called on the master
-         * port) and was unsuccesful.
+         * Called by the request port if sendTimingResp was called on this
+         * response port (causing recvTimingResp to be called on the request
+         * port) and was unsuccessful.
          */
         void recvRespRetry() override;
     };
@@ -137,7 +137,7 @@ class SimpleCache : public ClockedObject
      * Port on the memory-side that receives responses.
      * Mostly just forwards requests to the cache (owner)
      */
-    class MemSidePort : public MasterPort
+    class MemSidePort : public RequestPort
     {
       private:
         /// The object that owns this object (SimpleCache)
@@ -151,7 +151,7 @@ class SimpleCache : public ClockedObject
          * Constructor. Just calls the superclass constructor.
          */
         MemSidePort(const std::string& name, SimpleCache *owner) :
-            MasterPort(name, owner), owner(owner), blockedPacket(nullptr)
+            RequestPort(name, owner), owner(owner), blockedPacket(nullptr)
         { }
 
         /**
@@ -165,19 +165,19 @@ class SimpleCache : public ClockedObject
 
       protected:
         /**
-         * Receive a timing response from the slave port.
+         * Receive a timing response from the response port.
          */
         bool recvTimingResp(PacketPtr pkt) override;
 
         /**
-         * Called by the slave port if sendTimingReq was called on this
-         * master port (causing recvTimingReq to be called on the slave
+         * Called by the response port if sendTimingReq was called on this
+         * request port (causing recvTimingReq to be called on the response
          * port) and was unsuccesful.
          */
         void recvReqRetry() override;
 
         /**
-         * Called to receive an address range change from the peer slave
+         * Called to receive an address range change from the peer response
          * port. The default implementation ignores the change and does
          * nothing. Override this function in a derived class if the owner
          * needs to be aware of the address ranges, e.g. in an
@@ -292,10 +292,15 @@ class SimpleCache : public ClockedObject
     std::unordered_map<Addr, uint8_t*> cacheStore;
 
     /// Cache statistics
-    Stats::Scalar hits;
-    Stats::Scalar misses;
-    Stats::Histogram missLatency;
-    Stats::Formula hitRatio;
+  protected:
+    struct SimpleCacheStats : public Stats::Group
+    {
+        SimpleCacheStats(Stats::Group *parent);
+        Stats::Scalar hits;
+        Stats::Scalar misses;
+        Stats::Histogram missLatency;
+        Stats::Formula hitRatio;
+    } stats;
 
   public:
 
@@ -316,10 +321,6 @@ class SimpleCache : public ClockedObject
     Port &getPort(const std::string &if_name,
                   PortID idx=InvalidPortID) override;
 
-    /**
-     * Register the stats
-     */
-    void regStats() override;
 };
 
 

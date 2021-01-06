@@ -258,7 +258,13 @@ namespace Gcn3ISA
     template <typename T>
     inline T roundNearestEven(T val)
     {
-        T nearest_round = std::round(val * 0.5) * 2.0;
+        T int_part = 0;
+        T nearest_round = std::floor(val + 0.5);
+        if ((int)std::floor(val) % 2 == 0
+            && std::modf(std::abs(val), &int_part) == 0.5) {
+          nearest_round = nearest_round - 1;
+        }
+
         return nearest_round;
     }
 
@@ -505,7 +511,6 @@ namespace Gcn3ISA
                 src0[lane] = 0;
             }
 
-            src0.write();
             // reset for next iteration
             laneDisabled = false;
         }
@@ -547,11 +552,11 @@ namespace Gcn3ISA
      * operations are done on it.
      */
     template<typename T>
-    T sdwaInstSrcImpl_helper(T currOperVal, T origOperVal, SDWASelVals sel,
-                             bool signExt)
+    T sdwaInstSrcImpl_helper(T currOperVal, const T origOperVal,
+                             const SDWASelVals sel, const bool signExt)
     {
         // local variables
-        int first_bit = 0, last_bit = 0;
+        int low_bit = 0, high_bit = 0;
         bool signExt_local = signExt;
         T retVal = 0;
 
@@ -566,17 +571,19 @@ namespace Gcn3ISA
               of byte 0, or makes the bits of the selected byte be byte 0 (and
               next either sign extends or zero's out upper bits).
             */
-            first_bit = (sel * Gcn3ISA::BITS_PER_BYTE);
-            last_bit = first_bit + Gcn3ISA::MSB_PER_BYTE;
-            retVal = bits(currOperVal, first_bit, last_bit);
+            low_bit = (sel * Gcn3ISA::BITS_PER_BYTE);
+            high_bit = low_bit + Gcn3ISA::MSB_PER_BYTE;
+            retVal = bits(currOperVal, high_bit, low_bit);
 
             // make sure update propagated, since used next
-            assert(bits(retVal, Gcn3ISA::MSB_PER_BYTE) ==
-                   bits(origOperVal, (sel * Gcn3ISA::BITS_PER_BYTE) +
-                        Gcn3ISA::MSB_PER_BYTE));
+            fatal_if(bits(retVal, Gcn3ISA::MSB_PER_BYTE) !=
+                     bits(origOperVal, high_bit),
+                     "ERROR: SDWA byte update not propagated: retVal: %d, "
+                     "orig: %d\n", bits(retVal, Gcn3ISA::MSB_PER_BYTE),
+                     bits(origOperVal, high_bit));
             // sign extended value depends on upper-most bit of the new byte 0
             signExt_local = (signExt &&
-                             (bits(retVal, 0, Gcn3ISA::MSB_PER_BYTE) & 0x80));
+                             (bits(retVal, Gcn3ISA::MSB_PER_BYTE, 0) & 0x80));
 
             // process all other bytes -- if sign extending, make them 1, else
             // all 0's so leave as is
@@ -589,17 +596,20 @@ namespace Gcn3ISA
               of word 0, or makes the bits of the selected word be word 0 (and
               next either sign extends or zero's out upper bits).
             */
-            first_bit = (sel & 1) * Gcn3ISA::BITS_PER_WORD;
-            last_bit = first_bit + Gcn3ISA::MSB_PER_WORD;
-            retVal = bits(currOperVal, first_bit, last_bit);
+            low_bit = (sel & 1) * Gcn3ISA::BITS_PER_WORD;
+            high_bit = low_bit + Gcn3ISA::MSB_PER_WORD;
+            retVal = bits(currOperVal, high_bit, low_bit);
 
             // make sure update propagated, since used next
-            assert(bits(retVal, Gcn3ISA::MSB_PER_WORD) ==
-                   bits(origOperVal, ((sel & 1) * Gcn3ISA::BITS_PER_WORD) +
-                        Gcn3ISA::MSB_PER_WORD));
+            fatal_if(bits(retVal, Gcn3ISA::MSB_PER_WORD) !=
+                     bits(origOperVal, high_bit),
+                     "ERROR: SDWA word update not propagated: retVal: %d, "
+                     "orig: %d\n",
+                     bits(retVal, Gcn3ISA::MSB_PER_WORD),
+                     bits(origOperVal, high_bit));
             // sign extended value depends on upper-most bit of the new word 0
             signExt_local = (signExt &&
-                             (bits(retVal, 0, Gcn3ISA::MSB_PER_WORD) &
+                             (bits(retVal, Gcn3ISA::MSB_PER_WORD, 0) &
                               0x8000));
 
             // process other word -- if sign extending, make them 1, else all
@@ -635,16 +645,14 @@ namespace Gcn3ISA
      *   2.  if sign extend is set, then sign extend the value
      */
     template<typename T>
-    void sdwaInstSrcImpl(T & currOper, T & origCurrOper, SDWASelVals sel,
-                         bool signExt)
+    void sdwaInstSrcImpl(T & currOper, T & origCurrOper,
+                         const SDWASelVals sel, const bool signExt)
     {
         // iterate over all lanes, setting appropriate, selected value
-        currOper.read();
-        origCurrOper.read();
         for (int lane = 0; lane < NumVecElemPerVecReg; ++lane) {
             currOper[lane] = sdwaInstSrcImpl_helper(currOper[lane],
-                                                   origCurrOper[lane], sel,
-                                                   signExt);
+                                                    origCurrOper[lane], sel,
+                                                    signExt);
         }
     }
 
@@ -656,11 +664,12 @@ namespace Gcn3ISA
      * operations are done on it.
      */
     template<typename T>
-    T sdwaInstDstImpl_helper(T currDstVal, T origDstVal, bool clamp,
-                             SDWASelVals sel, SDWADstVals unusedBits_format)
+    T sdwaInstDstImpl_helper(T currDstVal, const T origDstVal,
+                             const bool clamp, const SDWASelVals sel,
+                             const SDWADstVals unusedBits_format)
     {
         // local variables
-        int first_bit = 0, last_bit = 0;
+        int low_bit = 0, high_bit = 0;
         bool signExt = (unusedBits_format == SDWA_UNUSED_SEXT);
         //bool pad = (unusedBits_format == SDWA_UNUSED_PAD);
         bool preserve = (unusedBits_format == SDWA_UNUSED_PRESERVE);
@@ -680,11 +689,11 @@ namespace Gcn3ISA
         if (sel < SDWA_WORD_0) { // we are selecting 1 byte
             // if we sign extended depends on upper-most bit of byte 0
             signExt = (signExt &&
-                       (bits(currDstVal, 0, Gcn3ISA::MSB_PER_WORD) & 0x80));
+                       (bits(currDstVal, Gcn3ISA::MSB_PER_WORD, 0) & 0x80));
 
             for (int byte = 0; byte < 4; ++byte) {
-                first_bit = byte * Gcn3ISA::BITS_PER_BYTE;
-                last_bit = first_bit + Gcn3ISA::MSB_PER_BYTE;
+                low_bit = byte * Gcn3ISA::BITS_PER_BYTE;
+                high_bit = low_bit + Gcn3ISA::MSB_PER_BYTE;
                 /*
                   Options:
                     1.  byte == sel: we are keeping all bits in this byte
@@ -693,23 +702,23 @@ namespace Gcn3ISA
                     3.  byte > sel && signExt: we're sign extending and
                     this byte is one of the bytes we need to sign extend
                 */
-                origBits_thisByte = bits(origDstVal, first_bit, last_bit);
-                currBits_thisByte = bits(currDstVal, first_bit, last_bit);
+                origBits_thisByte = bits(origDstVal, high_bit, low_bit);
+                currBits_thisByte = bits(currDstVal, high_bit, low_bit);
                 newBits = ((byte == sel) ? origBits_thisByte :
                            ((preserve) ? currBits_thisByte :
                             (((byte > sel) && signExt) ? 0xff : 0)));
-                retVal = insertBits(retVal, first_bit, last_bit, newBits);
+                retVal = insertBits(retVal, high_bit, low_bit, newBits);
             }
         } else if (sel < SDWA_DWORD) { // we are selecting 1 word
-            first_bit = 0;
-            last_bit = first_bit + Gcn3ISA::MSB_PER_WORD;
+            low_bit = 0;
+            high_bit = low_bit + Gcn3ISA::MSB_PER_WORD;
             // if we sign extended depends on upper-most bit of word 0
             signExt = (signExt &&
-                       (bits(currDstVal, first_bit, last_bit) & 0x8000));
+                       (bits(currDstVal, high_bit, low_bit) & 0x8000));
 
             for (int word = 0; word < 2; ++word) {
-                first_bit = word * Gcn3ISA::BITS_PER_WORD;
-                last_bit = first_bit + Gcn3ISA::MSB_PER_WORD;
+                low_bit = word * Gcn3ISA::BITS_PER_WORD;
+                high_bit = low_bit + Gcn3ISA::MSB_PER_WORD;
                 /*
                   Options:
                     1.  word == sel & 1: we are keeping all bits in this word
@@ -718,12 +727,12 @@ namespace Gcn3ISA
                     3.  word > (sel & 1) && signExt: we're sign extending and
                     this word is one of the words we need to sign extend
                 */
-                origBits_thisWord = bits(origDstVal, first_bit, last_bit);
-                currBits_thisWord = bits(currDstVal, first_bit, last_bit);
+                origBits_thisWord = bits(origDstVal, high_bit, low_bit);
+                currBits_thisWord = bits(currDstVal, high_bit, low_bit);
                 newBits = ((word == (sel & 0x1)) ? origBits_thisWord :
                            ((preserve) ? currBits_thisWord :
                             (((word > (sel & 0x1)) && signExt) ? 0xffff : 0)));
-                retVal = insertBits(retVal, first_bit, last_bit, newBits);
+                retVal = insertBits(retVal, high_bit, low_bit, newBits);
             }
         } else {
             assert(sel != SDWA_DWORD); // should have returned earlier
@@ -756,12 +765,11 @@ namespace Gcn3ISA
      *       2 (SDWA_UNUSED_PRESERVE): select data[31:0]
      */
     template<typename T>
-    void sdwaInstDstImpl(T & dstOper, T & origDstOper, bool clamp,
-                         SDWASelVals sel, SDWADstVals unusedBits_format)
+    void sdwaInstDstImpl(T & dstOper, T & origDstOper, const bool clamp,
+                         const SDWASelVals sel,
+                         const SDWADstVals unusedBits_format)
     {
         // iterate over all lanes, setting appropriate, selected value
-        dstOper.read();
-        origDstOper.read();
         for (int lane = 0; lane < NumVecElemPerVecReg; ++lane) {
             dstOper[lane] = sdwaInstDstImpl_helper(dstOper[lane],
                                                    origDstOper[lane], clamp,
@@ -779,8 +787,9 @@ namespace Gcn3ISA
      */
     template<typename T>
     void processSDWA_src_helper(T & currSrc, T & origCurrSrc,
-                                SDWASelVals src_sel, bool src_signExt,
-                                bool src_abs, bool src_neg)
+                                const SDWASelVals src_sel,
+                                const bool src_signExt, const bool src_abs,
+                                const bool src_neg)
     {
         /**
          * STEP 1: check if the absolute value (ABS) or negation (NEG) tags
@@ -812,14 +821,13 @@ namespace Gcn3ISA
      * processSDWA_src is called before the math.
      */
     template<typename T>
-    void processSDWA_src(GPUDynInstPtr gpuDynInst, InFmt_VOP_SDWA sdwaInst,
-                         T & src0, T & origSrc0)
+    void processSDWA_src(InFmt_VOP_SDWA sdwaInst, T & src0, T & origSrc0)
     {
         // local variables
-        SDWASelVals src0_sel = (SDWASelVals)sdwaInst.SRC0_SEL;
-        bool src0_signExt = sdwaInst.SRC0_SEXT;
-        bool src0_neg = sdwaInst.SRC0_NEG;
-        bool src0_abs = sdwaInst.SRC0_ABS;
+        const SDWASelVals src0_sel = (SDWASelVals)sdwaInst.SRC0_SEL;
+        const bool src0_signExt = sdwaInst.SRC0_SEXT;
+        const bool src0_neg = sdwaInst.SRC0_NEG;
+        const bool src0_abs = sdwaInst.SRC0_ABS;
 
         // NOTE: difference between VOP1 and VOP2/VOPC is that there is no src1
         // operand.  So ensure that SRC1 fields are not set, then call helper
@@ -841,18 +849,18 @@ namespace Gcn3ISA
      * called before the math.
      */
     template<typename T>
-    void processSDWA_src(GPUDynInstPtr gpuDynInst, InFmt_VOP_SDWA sdwaInst,
-                         T & src0, T & origSrc0, T & src1, T & origSrc1)
+    void processSDWA_src(InFmt_VOP_SDWA sdwaInst, T & src0, T & origSrc0,
+                         T & src1, T & origSrc1)
     {
         // local variables
-        SDWASelVals src0_sel = (SDWASelVals)sdwaInst.SRC0_SEL;
-        bool src0_signExt = sdwaInst.SRC0_SEXT;
-        bool src0_neg = sdwaInst.SRC0_NEG;
-        bool src0_abs = sdwaInst.SRC0_ABS;
-        SDWASelVals src1_sel = (SDWASelVals)sdwaInst.SRC1_SEL;
-        bool src1_signExt = sdwaInst.SRC1_SEXT;
-        bool src1_neg = sdwaInst.SRC1_NEG;
-        bool src1_abs = sdwaInst.SRC1_ABS;
+        const SDWASelVals src0_sel = (SDWASelVals)sdwaInst.SRC0_SEL;
+        const bool src0_signExt = sdwaInst.SRC0_SEXT;
+        const bool src0_neg = sdwaInst.SRC0_NEG;
+        const bool src0_abs = sdwaInst.SRC0_ABS;
+        const SDWASelVals src1_sel = (SDWASelVals)sdwaInst.SRC1_SEL;
+        const bool src1_signExt = sdwaInst.SRC1_SEXT;
+        const bool src1_neg = sdwaInst.SRC1_NEG;
+        const bool src1_abs = sdwaInst.SRC1_ABS;
 
         processSDWA_src_helper(src0, origSrc0, src0_sel, src0_signExt,
                                src0_abs, src0_neg);
@@ -869,13 +877,13 @@ namespace Gcn3ISA
      * processSDWA_src is called before the math.
      */
     template<typename T>
-    void processSDWA_dst(GPUDynInstPtr gpuDynInst, InFmt_VOP_SDWA sdwaInst,
-                         T & dst, T & origDst)
+    void processSDWA_dst(InFmt_VOP_SDWA sdwaInst, T & dst, T & origDst)
     {
         // local variables
-        SDWADstVals dst_unusedBits_format = (SDWADstVals)sdwaInst.DST_UNUSED;
-        SDWASelVals dst_sel = (SDWASelVals)sdwaInst.DST_SEL;
-        bool clamp = sdwaInst.CLAMP;
+        const SDWADstVals dst_unusedBits_format =
+            (SDWADstVals)sdwaInst.DST_UNUSED;
+        const SDWASelVals dst_sel = (SDWASelVals)sdwaInst.DST_SEL;
+        const bool clamp = sdwaInst.CLAMP;
 
         /**
          * STEP 1: select the appropriate bits for dst and pad/sign-extend as

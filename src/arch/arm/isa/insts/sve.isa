@@ -1516,27 +1516,49 @@ let {{
     # Generates definitions for SVE floating-point conversions (always
     # unary, constructive, merging
     def sveCvtInst(name, Name, opClass, types, op, direction=CvtDir.Narrow,
-                   decoder='Generic'):
+                   decoder='Generic', signed=False):
         global header_output, exec_output, decoders
+
+        if signed:
+            mask = "SElement msk = mask(sizeof(DElement)*8);"
+            assign_code = '''
+                int sign_bit = bits(destElem, sizeof(DElement)*8 -1);
+                AA64FpDest_x%(bigElemSuffix)s[i] =
+                                    sign_bit? (destElem|~msk): destElem;
+                          '''  % {
+               'bigElemSuffix': 's' if direction == CvtDir.Narrow else 'd'
+               }
+        else:
+            mask = "";
+            assign_code = '''
+                AA64FpDest_x%(bigElemSuffix)s[i] = destElem;
+            '''  % {
+               'bigElemSuffix': 's' if direction == CvtDir.Narrow else 'd'
+                   }
+
         code = sveEnabledCheckCode + '''
         unsigned eCount = ArmStaticInst::getCurSveVecLen<%(bigElemType)s>(
                 xc->tcBase());
+        %(mask)s
         for (unsigned i = 0; i < eCount; i++) {
             SElement srcElem1 = AA64FpOp1_x%(bigElemSuffix)s[i] &
                     mask(sizeof(SElement) * 8);
             DElement destElem = 0;
             if (GpOp_x%(bigElemSuffix)s[i]) {
                 %(op)s
-                AA64FpDest_x%(bigElemSuffix)s[i] = destElem;
+                %(assign)s;
             } else {
                 AA64FpDest_x%(bigElemSuffix)s[i] =
                         AA64FpDestMerge_x%(bigElemSuffix)s[i];
             }
         }
-        ''' % {'op': op,
-               'bigElemType': 'SElement' if direction == CvtDir.Narrow
+        ''' % {'bigElemType': 'SElement' if direction == CvtDir.Narrow
                                          else 'DElement',
-               'bigElemSuffix': 's' if direction == CvtDir.Narrow else 'd'}
+               'op': op, 'mask': mask,
+               'bigElemSuffix': 's' if direction == CvtDir.Narrow else 'd',
+               'assign': assign_code
+               }
+
         iop = InstObjParams(name, 'Sve' + Name, 'SveUnaryPredOp',
                             {'code': code, 'op_class': opClass}, [])
         header_output += SveWideningUnaryPredOpDeclare.subst(iop)
@@ -1813,26 +1835,25 @@ let {{
                 xc->tcBase());
 
         // Number of elements in a 128 bit segment
-        constexpr unsigned ePerSegment = 128 / sizeof(Element);
+        constexpr unsigned ePerSegment = 16 / sizeof(Element);
 
-        '''
-
-        code += '''
+        ArmISA::VecRegContainer tmpC;
+        auto auxDest = tmpC.as<TPElem>();
         for (unsigned i = 0; i < eCount; i++) {
-                const auto segmentBase = i - i % ePerSegment;
-                const auto segmentIdx = segmentBase + index;
+            const auto segmentBase = i - i %% ePerSegment;
+            const auto segmentIdx = segmentBase + index;
 
-                const Element& srcElem1 = AA64FpOp1_x[i];
-                const Element& srcElem2 = AA64FpOp2_x[segmentIdx];
-                Element destElem = 0;
+            const Element& srcElem1 = AA64FpOp1_x[i];
+            const Element& srcElem2 = AA64FpOp2_x[segmentIdx];
+            Element destElem = 0;
 
-        '''
-
-        code += '''
-        %(op)s
-        AA64FpDest_x[i] = destElem;
+            %(op)s
+            auxDest[i] = destElem;
         }
-        ''' % {'op': op}
+
+        for (unsigned i = 0; i < eCount; i++) {
+            AA64FpDest_x[i] = auxDest[i];
+        }''' % {'op':op}
 
         baseClass = 'SveBinIdxUnpredOp'
 
@@ -2045,8 +2066,10 @@ let {{
                 xc->tcBase());
 
         // Number of elements in a 128 bit segment
-        constexpr unsigned ePerSegment = 128 / sizeof(Element);
+        constexpr unsigned ePerSegment = 16 / sizeof(Element);
 
+        ArmISA::VecRegContainer tmpC;
+        auto auxDest = tmpC.as<TPElem>();
         for (unsigned i = 0; i < eCount; i++) {
             const auto segmentBase = i - i % ePerSegment;
             const auto segmentIdx = segmentBase + index;
@@ -2055,10 +2078,13 @@ let {{
             const Element& srcElem2 = AA64FpOp2_x[segmentIdx];
             Element destElem = AA64FpDestMerge_x[i];
         '''
-
         code += '''
             %(op)s
-            AA64FpDest_x[i] = destElem;
+            auxDest[i] = destElem;
+        }
+
+        for (unsigned i = 0; i < eCount; i++) {
+            AA64FpDest_x[i] = auxDest[i];
         }''' % {'op': op}
 
         iop = InstObjParams(name, 'Sve' + Name, 'SveBinIdxUnpredOp',
@@ -2743,6 +2769,7 @@ let {{
         code = sveEnabledCheckCode + '''
         unsigned eCount = ArmStaticInst::getCurSveVecLen<Element>(
                 xc->tcBase());
+
         ArmISA::VecRegContainer tmpVecC;
         auto auxDest = tmpVecC.as<Element>();
         int firstelem = -1, lastelem = -2;
@@ -3001,6 +3028,9 @@ let {{
             code += '''
         uint32_t eltspersegment = 16 / (2 * sizeof(Element));'''
         code += '''
+        ArmISA::VecRegContainer tmpC;
+        auto auxDest = tmpC.as<TPElem>();
+
         for (int i = 0; i < eCount / 2; ++i) {'''
         if predType == PredType.NONE:
             code += '''
@@ -3044,9 +3074,14 @@ let {{
             code += '''
             }'''
         code += '''
-            AA64FpDest_x[2 * i] = addend_r;
-            AA64FpDest_x[2 * i + 1] = addend_i;
-        }'''
+            auxDest[2 * i] = addend_r;
+            auxDest[2 * i + 1] = addend_i;
+        }
+
+        for (unsigned i = 0; i < eCount; i++) {
+            AA64FpDest_x[i] = auxDest[i];
+        }
+        '''
         iop = InstObjParams(name, 'Sve' + Name,
                 'SveComplexIdxOp' if predType == PredType.NONE
                                   else 'SveComplexOp',
@@ -3596,7 +3631,7 @@ let {{
                 'uint32_t, uint32_t',
                 'uint64_t, uint32_t',
                 'uint64_t, uint64_t'),
-               fcvtzsCode, CvtDir.Narrow)
+               fcvtzsCode, CvtDir.Narrow, signed=True)
     sveCvtInst('fcvtzs', 'FcvtzsWiden', 'SimdCvtOp',
                ('uint16_t, uint32_t',
                 'uint16_t, uint64_t',
@@ -4300,13 +4335,10 @@ let {{
         destElem = srcElem1 - (count * imm);
         bool negDest = (destElem < 0);
         bool negSrc = (srcElem1 < 0);
-        bool posCount = ((count * imm) >= 0);
-        if ((negDest != negSrc) && (negSrc == posCount)) {
+        if (!negDest && negSrc) {
             destElem = static_cast<%(dstType)s>(
                 (%(dstType)s)1 << (sizeof(%(dstType)s) * 8 - 1)
                 );
-            if (negDest)
-                destElem -= 1;
         }
     '''
     sveElemCountInst('sqdec', 'Sqdec32', 'SimdAluOp', signedTypes,
@@ -4359,13 +4391,11 @@ let {{
         destElem = srcElem1 + (count * imm);
         bool negDest = (destElem < 0);
         bool negSrc = (srcElem1 < 0);
-        bool negCount = ((count * imm) < 0);
-        if ((negDest != negSrc) && (negSrc == negCount)) {
+        if (negDest && !negSrc) {
             destElem = static_cast<%(dstType)s>(
                 (%(dstType)s)1 << (sizeof(%(dstType)s) * 8 - 1)
                 );
-            if (negDest)
-                destElem -= 1;
+            destElem -= 1;
         }
     '''
     sveElemCountInst('sqinc', 'Sqinc32', 'SimdAluOp', signedTypes,

@@ -50,6 +50,8 @@
 #include "params/GenericTimerMem.hh"
 #include "params/SystemCounter.hh"
 
+using namespace ArmISA;
+
 SystemCounter::SystemCounter(SystemCounterParams *const p)
     : SimObject(p),
       _enabled(true),
@@ -281,7 +283,14 @@ ArchTimer::updateCounter()
     if (value() >= _counterLimit) {
         counterLimitReached();
     } else {
+        // Clear the interurpt when timers conditions are not met
+        if (_interrupt->active()) {
+            DPRINTF(Timer, "Clearing interrupt\n");
+            _interrupt->clear();
+        }
+
         _control.istatus = 0;
+
         if (scheduleEvents()) {
             _parent.schedule(_counterLimitReachedEvent,
                              whenValue(_counterLimit));
@@ -309,12 +318,25 @@ ArchTimer::setControl(uint32_t val)
     _control.enable = new_ctl.enable;
     _control.imask = new_ctl.imask;
     _control.istatus = old_ctl.istatus;
-    // Timer enabled
-    if (!old_ctl.enable && new_ctl.enable)
+    // Timer unmasked or enabled
+    if ((old_ctl.imask && !new_ctl.imask) ||
+        (!old_ctl.enable && new_ctl.enable))
         updateCounter();
-    // Timer disabled
-    else if (old_ctl.enable && !new_ctl.enable)
-        _control.istatus = 0;
+    // Timer masked or disabled
+    else if ((!old_ctl.imask && new_ctl.imask) ||
+             (old_ctl.enable && !new_ctl.enable)) {
+
+        if (_interrupt->active()) {
+            DPRINTF(Timer, "Clearing interrupt\n");
+            // We are clearing the interrupt but we are not
+            // setting istatus to 0 as we are doing
+            // in the updateCounter.
+            // istatus signals that Timer conditions are met.
+            // It shouldn't depend on masking.
+            // if enable is zero. istatus is unknown.
+            _interrupt->clear();
+        }
+    }
 }
 
 void
@@ -415,6 +437,17 @@ GenericTimer::unserialize(CheckpointIn &cp)
         cpu_count = OLD_CPU_MAX;
     }
 
+    // We cannot assert for equality here because CPU timers are dynamically
+    // created on the first miscreg access. Therefore, if we take the checkpoint
+    // before any timer registers have been accessed, the number of counters
+    // is actually smaller than the total number of CPUs.
+    if (cpu_count > system.threads.size()) {
+        fatal("The simulated system has been initialized with %d CPUs, "
+              "but the Generic Timer checkpoint expects %d CPUs. Consider "
+              "restoring the checkpoint specifying %d CPUs.",
+              system.threads.size(), cpu_count, cpu_count);
+    }
+
     for (int i = 0; i < cpu_count; ++i) {
         CoreTimers &core(getTimers(i));
         core.unserializeSection(cp, csprintf("pe_implementation%d", i));
@@ -440,7 +473,7 @@ GenericTimer::createTimers(unsigned cpus)
     timers.resize(cpus);
     for (unsigned i = old_cpu_count; i < cpus; ++i) {
 
-        ThreadContext *tc = system.getThreadContext(i);
+        ThreadContext *tc = system.threads[i];
 
         timers[i].reset(
             new CoreTimers(*this, system, i,
@@ -481,7 +514,7 @@ void
 GenericTimer::setMiscReg(int reg, unsigned cpu, RegVal val)
 {
     CoreTimers &core(getTimers(cpu));
-    ThreadContext *tc = system.getThreadContext(cpu);
+    ThreadContext *tc = system.threads[cpu];
 
     switch (reg) {
       case MISCREG_CNTFRQ:
@@ -695,7 +728,7 @@ GenericTimer::CoreTimers::CoreTimers(GenericTimer &_parent,
     ArmInterruptPin *_irqVirt, ArmInterruptPin *_irqHyp)
       : parent(_parent),
         cntfrq(parent.params()->cntfrq),
-        threadContext(system.getThreadContext(cpu)),
+        threadContext(system.threads[cpu]),
         irqPhysS(_irqPhysS),
         irqPhysNS(_irqPhysNS),
         irqVirt(_irqVirt),
@@ -842,7 +875,7 @@ GenericTimerISA::readMiscReg(int reg)
 
 GenericTimerFrame::GenericTimerFrame(GenericTimerFrameParams *const p)
     : PioDevice(p),
-      timerRange(RangeSize(p->cnt_base, sys->getPageBytes())),
+      timerRange(RangeSize(p->cnt_base, ArmSystem::PageBytes)),
       addrRanges({timerRange}),
       systemCounter(*p->counter),
       physTimer(csprintf("%s.phys_timer", name()),
@@ -856,7 +889,7 @@ GenericTimerFrame::GenericTimerFrame(GenericTimerFrameParams *const p)
     SystemCounter::validateCounterRef(p->counter);
     // Expose optional CNTEL0Base register frame
     if (p->cnt_el0_base != MaxAddr) {
-        timerEl0Range = RangeSize(p->cnt_el0_base, sys->getPageBytes());
+        timerEl0Range = RangeSize(p->cnt_el0_base, ArmSystem::PageBytes);
         accessBitsEl0 = 0x303;
         addrRanges.push_back(timerEl0Range);
     }
@@ -968,7 +1001,7 @@ GenericTimerFrame::read(PacketPtr pkt)
     DPRINTF(Timer, "GenericTimerFrame::read: 0x%x<-0x%x(%i) [S = %u]\n", resp,
             addr, size, is_sec);
 
-    pkt->setUintX(resp, LittleEndianByteOrder);
+    pkt->setUintX(resp, ByteOrder::little);
     pkt->makeResponse();
     return 0;
 }
@@ -983,7 +1016,7 @@ GenericTimerFrame::write(PacketPtr pkt)
              "GenericTimerFrame::write: Invalid size %i\n", size);
 
     bool to_el0 = false;
-    const uint64_t data = pkt->getUintX(LittleEndianByteOrder);
+    const uint64_t data = pkt->getUintX(ByteOrder::little);
     Addr offset = 0;
     if (timerRange.contains(addr)) {
         offset = addr - timerRange.start();
@@ -1213,9 +1246,9 @@ GenericTimerFrame::timerWrite(Addr addr, size_t size, uint64_t data,
 
 GenericTimerMem::GenericTimerMem(GenericTimerMemParams *const p)
     : PioDevice(p),
-      counterCtrlRange(RangeSize(p->cnt_control_base, sys->getPageBytes())),
-      counterStatusRange(RangeSize(p->cnt_read_base, sys->getPageBytes())),
-      timerCtrlRange(RangeSize(p->cnt_ctl_base, sys->getPageBytes())),
+      counterCtrlRange(RangeSize(p->cnt_control_base, ArmSystem::PageBytes)),
+      counterStatusRange(RangeSize(p->cnt_read_base, ArmSystem::PageBytes)),
+      timerCtrlRange(RangeSize(p->cnt_ctl_base, ArmSystem::PageBytes)),
       cnttidr(0x0),
       addrRanges{counterCtrlRange, counterStatusRange, timerCtrlRange},
       systemCounter(*p->counter),
@@ -1242,7 +1275,7 @@ GenericTimerMem::GenericTimerMem(GenericTimerMemParams *const p)
 void
 GenericTimerMem::validateFrameRange(const AddrRange &range)
 {
-    fatal_if(range.start() % TheISA::PageBytes,
+    fatal_if(range.start() % ArmSystem::PageBytes,
              "GenericTimerMem::validateFrameRange: Architecture states each "
              "register frame should be in a separate memory page, specified "
              "range base address [0x%x] is not compliant\n");
@@ -1282,7 +1315,7 @@ GenericTimerMem::read(PacketPtr pkt)
     DPRINTF(Timer, "GenericTimerMem::read: 0x%x<-0x%x(%i) [S = %u]\n", resp,
             addr, size, is_sec);
 
-    pkt->setUintX(resp, LittleEndianByteOrder);
+    pkt->setUintX(resp, ByteOrder::little);
     pkt->makeResponse();
     return 0;
 }
@@ -1296,7 +1329,7 @@ GenericTimerMem::write(PacketPtr pkt)
     panic_if(size != 4 && size != 8,
              "GenericTimerMem::write: Invalid size %i\n", size);
 
-    const uint64_t data = pkt->getUintX(LittleEndianByteOrder);
+    const uint64_t data = pkt->getUintX(ByteOrder::little);
     if (counterCtrlRange.contains(addr))
         counterCtrlWrite(addr - counterCtrlRange.start(), size, data, is_sec);
     else if (counterStatusRange.contains(addr))

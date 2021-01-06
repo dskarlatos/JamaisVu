@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2012,2015,2018 ARM Limited
+ * Copyright (c) 2011-2012,2015,2018,2020 ARM Limited
  * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved
  *
@@ -120,6 +120,14 @@ class BaseSimpleCPU : public BaseCPU
 
     Status _status;
 
+    /**
+     * Handler used when encountering a fault; its purpose is to
+     * tear down the InstRecord. If a fault is meant to be traced,
+     * the handler won't delete the record and it will annotate
+     * the record as coming from a faulting instruction.
+     */
+    void traceFault();
+
   public:
     void checkForInterrupts();
     void setupFetchRequest(const RequestPtr &req);
@@ -132,8 +140,6 @@ class BaseSimpleCPU : public BaseCPU
     // statistics
     void regStats() override;
     void resetStats() override;
-
-    void startup() override;
 
     virtual Fault readMem(Addr addr, uint8_t* data, unsigned size,
                           Request::Flags flags,
@@ -170,6 +176,21 @@ class BaseSimpleCPU : public BaseCPU
     void serializeThread(CheckpointOut &cp, ThreadID tid) const override;
     void unserializeThread(CheckpointIn &cp, ThreadID tid) override;
 
+    /** Hardware transactional memory commands (HtmCmds), e.g. start a
+     * transaction and commit a transaction, are memory operations but are
+     * neither really (true) loads nor stores. For this reason the interface
+     * is extended and initiateHtmCmd() is used to instigate the command. */
+    virtual Fault initiateHtmCmd(Request::Flags flags) = 0;
+
+    /** This function is used to instruct the memory subsystem that a
+     * transaction should be aborted and the speculative state should be
+     * thrown away.  This is called in the transaction's very last breath in
+     * the core.  Afterwards, the core throws away its speculative state and
+     * resumes execution at the point the transaction started, i.e. reverses
+     * time.  When instruction execution resumes, the core expects the
+     * memory subsystem to be in a stable, i.e. pre-speculative, state as
+     * well. */
+    virtual void htmSendAbortSignal(HtmFailureFaultCause cause) = 0;
 };
 
 #endif // __CPU_SIMPLE_BASE_HH__

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018 ARM Limited
+ * Copyright (c) 2018-2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -40,6 +40,7 @@
 #include "debug/Drain.hh"
 #include "debug/QOS.hh"
 #include "mem_sink.hh"
+#include "params/QoSMemSinkInterface.hh"
 #include "sim/system.hh"
 
 namespace QoS {
@@ -50,12 +51,15 @@ MemSinkCtrl::MemSinkCtrl(const QoSMemSinkCtrlParams* p)
     memoryPacketSize(p->memory_packet_size),
     readBufferSize(p->read_buffer_size),
     writeBufferSize(p->write_buffer_size), port(name() + ".port", *this),
+    interface(p->interface),
     retryRdReq(false), retryWrReq(false), nextRequest(0), nextReqEvent(this)
 {
     // Resize read and write queue to allocate space
     // for configured QoS priorities
     readQueue.resize(numPriorities());
     writeQueue.resize(numPriorities());
+
+    interface->setMemCtrl(this);
 }
 
 MemSinkCtrl::~MemSinkCtrl()
@@ -92,7 +96,7 @@ MemSinkCtrl::recvAtomic(PacketPtr pkt)
              "%s Should not see packets where cache is responding\n",
              __func__);
 
-    access(pkt);
+    interface->access(pkt);
     return responseLatency;
 }
 
@@ -101,7 +105,7 @@ MemSinkCtrl::recvFunctional(PacketPtr pkt)
 {
     pkt->pushLabel(name());
 
-    functionalAccess(pkt);
+    interface->functionalAccess(pkt);
 
     pkt->popLabel();
 }
@@ -132,9 +136,9 @@ MemSinkCtrl::recvTimingReq(PacketPtr pkt)
              __func__);
 
     DPRINTF(QOS,
-            "%s: MASTER %s request %s addr %lld size %d\n",
+            "%s: REQUESTOR %s request %s addr %lld size %d\n",
             __func__,
-            _system->getMasterName(pkt->req->masterId()),
+            _system->getRequestorName(pkt->req->requestorId()),
             pkt->cmdString(), pkt->getAddr(), pkt->getSize());
 
     uint64_t required_entries = divCeil(pkt->getSize(), memoryPacketSize);
@@ -178,7 +182,7 @@ MemSinkCtrl::recvTimingReq(PacketPtr pkt)
     if (req_accepted) {
         // The packet is accepted - log it
         logRequest(pkt->isRead()? READ : WRITE,
-                   pkt->req->masterId(),
+                   pkt->req->requestorId(),
                    pkt->qosValue(),
                    pkt->getAddr(),
                    required_entries);
@@ -221,7 +225,7 @@ MemSinkCtrl::processNextReqEvent()
         for (uint8_t i = 0; i < numPriorities(); ++i) {
             std::string plist = "";
             for (auto& e : (busState == WRITE ? writeQueue[i]: readQueue[i])) {
-                plist += (std::to_string(e->req->masterId())) + " ";
+                plist += (std::to_string(e->req->requestorId())) + " ";
             }
             DPRINTF(QOS,
                     "%s priority Queue [%i] contains %i elements, "
@@ -251,9 +255,9 @@ MemSinkCtrl::processNextReqEvent()
             queue->erase(p_it);
 
             DPRINTF(QOS,
-                    "%s scheduling packet address %d for master %s from "
+                    "%s scheduling packet address %d for requestor %s from "
                     "priority queue %d\n", __func__, pkt->getAddr(),
-                    _system->getMasterName(pkt->req->masterId()),
+                    _system->getRequestorName(pkt->req->requestorId()),
                     curr_prio);
             break;
         }
@@ -268,9 +272,9 @@ MemSinkCtrl::processNextReqEvent()
     uint64_t removed_entries = divCeil(pkt->getSize(), memoryPacketSize);
 
     DPRINTF(QOS,
-            "%s scheduled packet address %d for master %s size is %d, "
+            "%s scheduled packet address %d for requestor %s size is %d, "
             "corresponds to %d memory packets\n", __func__, pkt->getAddr(),
-            _system->getMasterName(pkt->req->masterId()),
+            _system->getRequestorName(pkt->req->requestorId()),
             pkt->getSize(), removed_entries);
 
     // Schedule response
@@ -279,11 +283,11 @@ MemSinkCtrl::processNextReqEvent()
 
     // Do the actual memory access which also turns the packet
     // into a response
-    access(pkt);
+    interface->access(pkt);
 
     // Log the response
     logResponse(pkt->isRead()? READ : WRITE,
-                pkt->req->masterId(),
+                pkt->req->requestorId(),
                 pkt->qosValue(),
                 pkt->getAddr(),
                 removed_entries, responseLatency);
@@ -344,14 +348,15 @@ MemSinkCtrl::regStats()
 
 MemSinkCtrl::MemoryPort::MemoryPort(const std::string& n,
                                     MemSinkCtrl& m)
-  : QueuedSlavePort(n, &m, queue, true), memory(m), queue(memory, *this, true)
+  : QueuedResponsePort(n, &m, queue, true),
+   memory(m), queue(memory, *this, true)
 {}
 
 AddrRangeList
 MemSinkCtrl::MemoryPort::getAddrRanges() const
 {
     AddrRangeList ranges;
-    ranges.push_back(memory.getAddrRange());
+    ranges.push_back(memory.interface->getAddrRange());
     return ranges;
 }
 
@@ -390,3 +395,13 @@ QoSMemSinkCtrlParams::create()
     return new QoS::MemSinkCtrl(this);
 }
 
+QoSMemSinkInterface::QoSMemSinkInterface(const QoSMemSinkInterfaceParams* _p)
+    : AbstractMemory(_p)
+{
+}
+
+QoSMemSinkInterface*
+QoSMemSinkInterfaceParams::create()
+{
+    return new QoSMemSinkInterface(this);
+}

@@ -109,7 +109,7 @@ def addNoISAOptions(parser):
                       default="512MB",
                       help="Specify the physical memory size (single memory)")
     parser.add_option("--enable-dram-powerdown", action="store_true",
-                       help="Enable low-power states in DRAMCtrl")
+                       help="Enable low-power states in DRAMInterface")
     parser.add_option("--mem-channels-intlv", type="int", default=0,
                       help="Memory channels interleave")
 
@@ -361,6 +361,14 @@ def addCommonOptions(parser):
     parser.add_option("--arm-iset", default="arm", type="choice",
                       choices=["arm", "thumb", "aarch64"],
                       help="ARM instruction set.")
+    parser.add_option("--stats-root", action="append", default=[], help=
+        "If given, dump only stats of objects under the given SimObject. "
+        "SimObjects are identified with Python notation as in: "
+        "system.cpu[0].dtb. All elements of an array can be selected at "
+        "once with: system.cpu[:].dtb. If given multiple times, dump stats "
+        "that are present under any of the roots. If not given, dump all "
+        "stats. "
+    )
 
     # base configs
     parser.add_option("--needsTSO", action="store_true", help="Select TSO")

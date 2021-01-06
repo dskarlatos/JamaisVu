@@ -141,6 +141,8 @@ namespace Gcn3ISA
              *
              */
             regIdx = numScalarRegs - 2;
+        } else if (idx == REG_VCC_HI) {
+            regIdx = numScalarRegs - 1;
         } else if (idx == REG_FLAT_SCRATCH_LO) {
             /**
              * the FLAT_SCRATCH register occupies the two SRF entries
@@ -160,6 +162,31 @@ namespace Gcn3ISA
         }
 
         return regIdx;
+    }
+
+    bool
+    isPosConstVal(int opIdx)
+    {
+        bool is_pos_const_val = (opIdx >= REG_INT_CONST_POS_MIN
+            && opIdx <= REG_INT_CONST_POS_MAX);
+
+        return is_pos_const_val;
+    }
+
+    bool
+    isNegConstVal(int opIdx)
+    {
+        bool is_neg_const_val = (opIdx >= REG_INT_CONST_NEG_MIN
+            && opIdx <= REG_INT_CONST_NEG_MAX);
+
+        return is_neg_const_val;
+    }
+
+    bool
+    isConstVal(int opIdx)
+    {
+        bool is_const_val = isPosConstVal(opIdx) || isNegConstVal(opIdx);
+        return is_const_val;
     }
 
     bool

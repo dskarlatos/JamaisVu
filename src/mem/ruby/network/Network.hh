@@ -90,20 +90,20 @@ class Network : public ClockedObject
     static uint32_t MessageSizeType_to_int(MessageSizeType size_type);
 
     // returns the queue requested for the given component
-    void setToNetQueue(NodeID id, bool ordered, int netNumber,
+    void setToNetQueue(NodeID global_id, bool ordered, int netNumber,
                                std::string vnet_type, MessageBuffer *b);
-    virtual void setFromNetQueue(NodeID id, bool ordered, int netNumber,
+    virtual void setFromNetQueue(NodeID global_id, bool ordered, int netNumber,
                                  std::string vnet_type, MessageBuffer *b);
 
-    virtual void checkNetworkAllocation(NodeID id, bool ordered,
-        int network_num, std::string vnet_type);
+    virtual void checkNetworkAllocation(NodeID local_id, bool ordered,
+                                       int network_num, std::string vnet_type);
 
     virtual void makeExtOutLink(SwitchID src, NodeID dest, BasicLink* link,
-                             const NetDest& routing_table_entry) = 0;
+                             std::vector<NetDest>& routing_table_entry) = 0;
     virtual void makeExtInLink(NodeID src, SwitchID dest, BasicLink* link,
-                            const NetDest& routing_table_entry) = 0;
+                            std::vector<NetDest>& routing_table_entry) = 0;
     virtual void makeInternalLink(SwitchID src, SwitchID dest, BasicLink* link,
-                                  const NetDest& routing_table_entry,
+                                  std::vector<NetDest>& routing_table_entry,
                                   PortDirection src_outport,
                                   PortDirection dst_inport) = 0;
 
@@ -140,6 +140,8 @@ class Network : public ClockedObject
         return RubyDummyPort::instance();
     }
 
+    NodeID getLocalNodeID(NodeID global_id) const;
+
   protected:
     // Private copy constructor and assignment operator
     Network(const Network& obj);
@@ -158,30 +160,16 @@ class Network : public ClockedObject
     std::vector<bool> m_ordered;
 
   private:
-    //! Callback class used for collating statistics from all the
-    //! controller of this type.
-    class StatsCallback : public Callback
-    {
-      private:
-        Network *ctr;
-
-      public:
-        virtual ~StatsCallback() {}
-
-        StatsCallback(Network *_ctr)
-            : ctr(_ctr)
-        {
-        }
-
-        void process() {ctr->collateStats();}
-    };
-
     // Global address map
     struct AddrMapNode {
         NodeID id;
         AddrRangeList ranges;
     };
     std::unordered_multimap<MachineType, AddrMapNode> addrMap;
+
+    // Global NodeID to local node map. If there are not multiple networks in
+    // the same RubySystem, this is a one-to-one mapping of global to local.
+    std::unordered_map<NodeID, NodeID> globalToLocalMap;
 };
 
 inline std::ostream&

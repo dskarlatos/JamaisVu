@@ -32,6 +32,7 @@
 #include "base/loader/symtab.hh"
 #include "params/Workload.hh"
 #include "sim/sim_object.hh"
+#include "sim/stats.hh"
 
 class System;
 class ThreadContext;
@@ -41,16 +42,32 @@ class Workload : public SimObject
   protected:
     virtual Addr fixFuncEventAddr(Addr addr) const { return addr; }
 
+    struct WorkloadStats : public Stats::Group
+    {
+        Stats::Scalar arm;
+        Stats::Scalar quiesce;
+
+        WorkloadStats(Workload *workload) : Stats::Group(workload),
+            arm(this, "inst.arm", "number of arm instructions executed"),
+            quiesce(this, "inst.quiesce",
+                    "number of quiesce instructions executed")
+        {}
+    } stats;
+
   public:
-    using SimObject::SimObject;
+    Workload(const WorkloadParams *_params) : SimObject(_params), stats(this)
+    {}
+
+    void recordQuiesce() { stats.quiesce++; }
+    void recordArm() { stats.arm++; }
 
     System *system = nullptr;
 
     virtual Addr getEntry() const = 0;
     virtual Loader::Arch getArch() const = 0;
 
-    virtual const Loader::SymbolTable *symtab(ThreadContext *tc) = 0;
-    virtual bool insertSymbol(Addr address, const std::string &symbol) = 0;
+    virtual const Loader::SymbolTable &symtab(ThreadContext *tc) = 0;
+    virtual bool insertSymbol(const Loader::Symbol &symbol) = 0;
 
     /** @{ */
     /**
@@ -67,29 +84,27 @@ class Workload : public SimObject
      */
     template <class T, typename... Args>
     T *
-    addFuncEvent(const Loader::SymbolTable *symtab, const char *lbl,
+    addFuncEvent(const Loader::SymbolTable &symtab, const char *lbl,
                  const std::string &desc, Args... args)
     {
-        Addr addr M5_VAR_USED = 0; // initialize only to avoid compiler warning
+        auto it = symtab.find(lbl);
+        if (it == symtab.end())
+            return nullptr;
 
-        if (symtab->findAddress(lbl, addr)) {
-            return new T(system, desc, fixFuncEventAddr(addr),
-                          std::forward<Args>(args)...);
-        }
-
-        return nullptr;
+        return new T(system, desc, fixFuncEventAddr(it->address),
+                      std::forward<Args>(args)...);
     }
 
     template <class T>
     T *
-    addFuncEvent(const Loader::SymbolTable *symtab, const char *lbl)
+    addFuncEvent(const Loader::SymbolTable &symtab, const char *lbl)
     {
         return addFuncEvent<T>(symtab, lbl, lbl);
     }
 
     template <class T, typename... Args>
     T *
-    addFuncEventOrPanic(const Loader::SymbolTable *symtab, const char *lbl,
+    addFuncEventOrPanic(const Loader::SymbolTable &symtab, const char *lbl,
                         Args... args)
     {
         T *e = addFuncEvent<T>(symtab, lbl, std::forward<Args>(args)...);

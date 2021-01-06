@@ -44,7 +44,6 @@
 
 #include <array>
 
-#include "arch/isa_traits.hh"
 #include "config/the_isa.hh"
 #include "cpu/o3/cpu.hh"
 #include "cpu/o3/isa_specific.hh"
@@ -250,7 +249,7 @@ class BaseO3DynInst : public BaseDynInst<Impl>
     void trap(const Fault &fault);
 
     /** Emulates a syscall. */
-    void syscall(Fault *fault) override;
+    void syscall() override;
 
   public:
 

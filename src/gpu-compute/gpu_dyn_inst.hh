@@ -39,7 +39,8 @@
 
 #include "base/amo.hh"
 #include "base/logging.hh"
-#include "enums/MemType.hh"
+#include "base/trace.hh"
+#include "debug/GPUMem.hh"
 #include "enums/StorageClassType.hh"
 #include "gpu-compute/compute_unit.hh"
 #include "gpu-compute/gpu_exec_context.hh"
@@ -68,19 +69,9 @@ class AtomicOpCAS : public TypedAtomicOpFunctor<T>
         } else {
             computeUnit->numFailedCASOps++;
         }
-
-        if (computeUnit->xact_cas_mode) {
-            computeUnit->xactCasLoadMap.clear();
-        }
     }
     AtomicOpFunctor* clone () { return new AtomicOpCAS(c, s, computeUnit); }
 };
-
-typedef enum
-{
-    VT_32,
-    VT_64,
-} vgpr_type;
 
 class GPUDynInst : public GPUExecContext
 {
@@ -91,27 +82,51 @@ class GPUDynInst : public GPUExecContext
     void execute(GPUDynInstPtr gpuDynInst);
     int numSrcRegOperands();
     int numDstRegOperands();
+    int numDstVecOperands();
+    int numSrcVecOperands();
+    int numSrcVecDWORDs();
+    int numDstVecDWORDs();
+    int numOpdDWORDs(int operandIdx);
     int getNumOperands();
     bool isVectorRegister(int operandIdx);
     bool isScalarRegister(int operandIdx);
-    bool isCondRegister(int operandIdx);
     int getRegisterIndex(int operandIdx, GPUDynInstPtr gpuDynInst);
     int getOperandSize(int operandIdx);
     bool isDstOperand(int operandIdx);
     bool isSrcOperand(int operandIdx);
 
+    bool hasDestinationSgpr() const;
+    bool hasSourceSgpr() const;
+    bool hasDestinationVgpr() const;
+    bool hasSourceVgpr() const;
+
+    bool hasSgprRawDependence(GPUDynInstPtr s);
+    bool hasVgprRawDependence(GPUDynInstPtr s);
+
+    // returns true if the string "opcodeStr" is found in the
+    // opcode of the instruction
+    bool isOpcode(const std::string& opcodeStr) const;
+    bool isOpcode(const std::string& opcodeStr,
+                  const std::string& extStr) const;
+    // returns true if source operand at "index" is a vector register
+    bool srcIsVgpr(int index) const;
+
     const std::string &disassemble() const;
 
-    uint64_t seqNum() const;
+    InstSeqNum seqNum() const;
 
     Enums::StorageClassType executedAs();
 
-    // The address of the memory operation
+    // virtual address for scalar memory operations
+    Addr scalarAddr;
+    // virtual addressies for vector memory operations
     std::vector<Addr> addr;
     Addr pAddr;
 
-    // The data to get written
+    // vector data to get written
     uint8_t *d_data;
+    // scalar data to be transferred
+    uint8_t *scalar_data;
     // Additional data (for atomics)
     uint8_t *a_data;
     // Additional data (for atomics)
@@ -119,19 +134,6 @@ class GPUDynInst : public GPUExecContext
     // The execution mask
     VectorMask exec_mask;
 
-    // The memory type (M_U32, M_S32, ...)
-    Enums::MemType m_type;
-
-    // The equivalency class
-    int equiv;
-    // The return VGPR type (VT_32 or VT_64)
-    vgpr_type v_type;
-    // Number of VGPR's accessed (1, 2, or 4)
-    int n_reg;
-    // The return VGPR index
-    int dst_reg;
-    // There can be max 4 dest regs>
-    int dst_reg_vec[4];
     // SIMD where the WF of the memory instruction has been mapped to
     int simdId;
     // unique id of the WF where the memory instruction belongs to
@@ -140,21 +142,16 @@ class GPUDynInst : public GPUExecContext
     int kern_id;
     // The CU id of the requesting wf
     int cu_id;
+    // The workgroup id of the requesting wf
+    int wg_id;
     // HW slot id where the WF is mapped to inside a SIMD unit
     int wfSlotId;
     // execution pipeline id where the memory instruction has been scheduled
-    int pipeId;
+    int execUnitId;
     // The execution time of this operation
     Tick time;
     // The latency of this operation
     WaitClass latency;
-    // A list of bank conflicts for the 4 cycles.
-    uint32_t bc[4];
-
-    // A pointer to ROM
-    uint8_t *rom;
-    // The size of the READONLY segment
-    int sz_rom;
 
     // Initiate the specified memory operation, by creating a
     // memory request and sending it off to the memory system.
@@ -168,16 +165,23 @@ class GPUDynInst : public GPUExecContext
 
     GPUStaticInst* staticInstruction() { return _staticInst; }
 
+    TheGpuISA::ScalarRegU32 srcLiteral() const;
+
     bool isALU() const;
     bool isBranch() const;
+    bool isCondBranch() const;
     bool isNop() const;
     bool isReturn() const;
+    bool isEndOfKernel() const;
+    bool isKernelLaunch() const;
+    bool isSDWAInst() const;
+    bool isDPPInst() const;
     bool isUnconditionalJump() const;
     bool isSpecialOp() const;
     bool isWaitcnt() const;
 
     bool isBarrier() const;
-    bool isMemFence() const;
+    bool isMemSync() const;
     bool isMemRef() const;
     bool isFlat() const;
     bool isLoad() const;
@@ -188,10 +192,20 @@ class GPUDynInst : public GPUExecContext
     bool isAtomicRet() const;
 
     bool isScalar() const;
+    bool isVector() const;
     bool readsSCC() const;
     bool writesSCC() const;
     bool readsVCC() const;
     bool writesVCC() const;
+    bool readsEXEC() const;
+    bool writesEXEC() const;
+    bool readsMode() const;
+    bool writesMode() const;
+    bool ignoreExec() const;
+    bool readsFlatScratch() const;
+    bool writesFlatScratch() const;
+    bool readsExecMask() const;
+    bool writesExecMask() const;
 
     bool isAtomicAnd() const;
     bool isAtomicOr() const;
@@ -217,39 +231,25 @@ class GPUDynInst : public GPUExecContext
     bool isReadOnlySeg() const;
     bool isSpillSeg() const;
 
-    bool isWorkitemScope() const;
-    bool isWavefrontScope() const;
-    bool isWorkgroupScope() const;
-    bool isDeviceScope() const;
-    bool isSystemScope() const;
-    bool isNoScope() const;
-
-    bool isRelaxedOrder() const;
-    bool isAcquire() const;
-    bool isRelease() const;
-    bool isAcquireRelease() const;
-    bool isNoOrder() const;
-
     bool isGloballyCoherent() const;
     bool isSystemCoherent() const;
 
-    /*
-     * Loads/stores/atomics may have acquire/release semantics associated
-     * withthem. Some protocols want to see the acquire/release as separate
-     * requests from the load/store/atomic. We implement that separation
-     * using continuations (i.e., a function pointer with an object associated
-     * with it). When, for example, the front-end generates a store with
-     * release semantics, we will first issue a normal store and set the
-     * continuation in the GPUDynInst to a function that generate a
-     * release request. That continuation will be called when the normal
-     * store completes (in ComputeUnit::DataPort::recvTimingResponse). The
-     * continuation will be called in the context of the same GPUDynInst
-     * that generated the initial store.
-     */
-    std::function<void(GPUStaticInst*, GPUDynInstPtr)> execContinuation;
+    bool isF16() const;
+    bool isF32() const;
+    bool isF64() const;
 
-    // when true, call execContinuation when response arrives
-    bool useContinuation;
+    bool isFMA() const;
+    bool isMAC() const;
+    bool isMAD() const;
+
+    // for FLAT memory ops. check the segment address
+    // against the APE registers to see if it falls
+    // within one of the APE ranges for LDS/SCRATCH/GPUVM.
+    // if it does not fall into one of the three APEs, it
+    // will be a regular global access.
+    void doApertureCheck(const VectorMask &mask);
+    // Function to resolve a flat accesses during execution stage.
+    void resolveFlatSegment(const VectorMask &mask);
 
     template<typename c0> AtomicOpFunctorPtr
     makeAtomicOpFunctor(c0 *reg0, c0 *reg1)
@@ -282,62 +282,120 @@ class GPUDynInst : public GPUExecContext
     }
 
     void
-    setRequestFlags(RequestPtr req, bool setMemOrder=true)
+    setRequestFlags(RequestPtr req) const
     {
-        // currently these are the easy scopes to deduce
-        if (isPrivateSeg()) {
-            req->setMemSpaceConfigFlags(Request::PRIVATE_SEGMENT);
-        } else if (isSpillSeg()) {
-            req->setMemSpaceConfigFlags(Request::SPILL_SEGMENT);
-        } else if (isGlobalSeg()) {
-            req->setMemSpaceConfigFlags(Request::GLOBAL_SEGMENT);
-        } else if (isReadOnlySeg()) {
-            req->setMemSpaceConfigFlags(Request::READONLY_SEGMENT);
-        } else if (isGroupSeg()) {
-            req->setMemSpaceConfigFlags(Request::GROUP_SEGMENT);
-        } else if (isFlat()) {
-            panic("TODO: translate to correct scope");
-        } else {
-            fatal("%s has bad segment type\n", disassemble());
+        if (isGloballyCoherent()) {
+            req->setCacheCoherenceFlags(Request::GLC_BIT);
         }
 
-        if (isWavefrontScope()) {
-            req->setMemSpaceConfigFlags(Request::SCOPE_VALID |
-                                        Request::WAVEFRONT_SCOPE);
-        } else if (isWorkgroupScope()) {
-            req->setMemSpaceConfigFlags(Request::SCOPE_VALID |
-                                        Request::WORKGROUP_SCOPE);
-        } else if (isDeviceScope()) {
-            req->setMemSpaceConfigFlags(Request::SCOPE_VALID |
-                                        Request::DEVICE_SCOPE);
-        } else if (isSystemScope()) {
-            req->setMemSpaceConfigFlags(Request::SCOPE_VALID |
-                                        Request::SYSTEM_SCOPE);
-        } else if (!isNoScope() && !isWorkitemScope()) {
-            fatal("%s has bad scope type\n", disassemble());
+        if (isSystemCoherent()) {
+            req->setCacheCoherenceFlags(Request::SLC_BIT);
         }
 
-        if (setMemOrder) {
-            // set acquire and release flags
-            if (isAcquire()) {
-                req->setFlags(Request::ACQUIRE);
-            } else if (isRelease()) {
-                req->setFlags(Request::RELEASE);
-            } else if (isAcquireRelease()) {
-                req->setFlags(Request::ACQUIRE | Request::RELEASE);
-            } else if (!isNoOrder()) {
-                fatal("%s has bad memory order\n", disassemble());
-            }
-        }
-
-        // set atomic type
-        // currently, the instruction genenerator only produces atomic return
-        // but a magic instruction can produce atomic no return
         if (isAtomicRet()) {
             req->setFlags(Request::ATOMIC_RETURN_OP);
         } else if (isAtomicNoRet()) {
             req->setFlags(Request::ATOMIC_NO_RETURN_OP);
         }
+
+        if (isMemSync()) {
+            // the path for kernel launch and kernel end is different
+            // from non-kernel mem sync.
+            assert(!isKernelLaunch());
+            assert(!isEndOfKernel());
+
+            // must be wbinv inst if not kernel launch/end
+            req->setCacheCoherenceFlags(Request::ACQUIRE);
+        }
+    }
+
+    // reset the number of pending memory requests for all lanes
+    void
+    resetEntireStatusVector()
+    {
+        assert(statusVector.size() == TheGpuISA::NumVecElemPerVecReg);
+        for (int lane = 0; lane < TheGpuISA::NumVecElemPerVecReg; ++lane) {
+            resetStatusVector(lane);
+        }
+    }
+
+    // reset the number of pending memory requests for the inputted lane
+    void
+    resetStatusVector(int lane)
+    {
+        setStatusVector(lane, 0);
+    }
+
+    // set the number of pending memory requests for the inputted lane
+    void
+    setStatusVector(int lane, int newVal)
+    {
+        // currently we can have up to 2 memory requests per lane (if the
+        // lane's request goes across multiple cache lines)
+        assert((newVal >= 0) && (newVal <= 2));
+        statusVector[lane] = newVal;
+    }
+
+    // subtracts the number of pending memory requests for the inputted lane
+    // by 1
+    void
+    decrementStatusVector(int lane)
+    {
+        // this lane may have multiple requests, so only subtract one for
+        // this request
+        assert(statusVector[lane] >= 1);
+        statusVector[lane]--;
+    }
+
+    // return the current number of pending memory requests for the inputted
+    // lane
+    int
+    getLaneStatus(int lane) const
+    {
+        return statusVector[lane];
+    }
+
+    // returns true if all memory requests from all lanes have been received,
+    // else returns false
+    bool
+    allLanesZero() const
+    {
+        // local variables
+        bool allZero = true;
+
+        // iterate over all lanes, checking the number of pending memory
+        // requests they have
+        for (int lane = 0; lane < TheGpuISA::NumVecElemPerVecReg; ++lane) {
+            // if any lane still has pending requests, return false
+            if (statusVector[lane] > 0) {
+                DPRINTF(GPUMem, "CU%d: WF[%d][%d]: lane: %d has %d pending "
+                        "request(s) for %#x\n", cu_id, simdId, wfSlotId, lane,
+                        statusVector[lane], addr[lane]);
+                allZero = false;
+            }
+        }
+
+        if (allZero) {
+            DPRINTF(GPUMem, "CU%d: WF[%d][%d]: all lanes have no pending"
+                    " requests for %#x\n", cu_id, simdId, wfSlotId, addr[0]);
+        }
+        return allZero;
+    }
+
+    // returns a string representing the current state of the statusVector
+    std::string
+    printStatusVector() const
+    {
+        std::string statusVec_str = "[";
+
+        // iterate over all lanes, adding the current number of pending
+        // requests for this lane to the string
+        for (int lane = 0; lane < TheGpuISA::NumVecElemPerVecReg; ++lane) {
+            statusVec_str += std::to_string(statusVector[lane]);
+        }
+        statusVec_str += "]";
+
+        return statusVec_str;
     }
 
     // Map returned packets and the addresses they satisfy with which lane they
@@ -345,15 +403,43 @@ class GPUDynInst : public GPUExecContext
     typedef std::unordered_map<Addr, std::vector<int>> StatusVector;
     StatusVector memStatusVector;
 
-    // Track the status of memory requests per lane, a bit per lane
-    VectorMask statusBitVector;
-    // for ld_v# or st_v#
+    // Track the status of memory requests per lane, an int per lane to allow
+    // unaligned accesses
     std::vector<int> statusVector;
+    // for ld_v# or st_v#
     std::vector<int> tlbHitLevel;
 
+    // for misaligned scalar ops we track the number
+    // of outstanding reqs here
+    int numScalarReqs;
+
+    Tick getAccessTime() const { return accessTime; }
+
+    void setAccessTime(Tick currentTime) { accessTime = currentTime; }
+
+    void profileRoundTripTime(Tick currentTime, int hopId);
+    std::vector<Tick> getRoundTripTime() const { return roundTripTime; }
+
+    void profileLineAddressTime(Addr addr, Tick currentTime, int hopId);
+    const std::map<Addr, std::vector<Tick>>& getLineAddressTime() const
+    { return lineAddressTime; }
+
+    // inst used to save/restore a wavefront context
+    bool isSaveRestore;
   private:
     GPUStaticInst *_staticInst;
-    uint64_t _seqNum;
+    const InstSeqNum _seqNum;
+
+    // the time the request was started
+    Tick accessTime = -1;
+
+    // hold the tick when the instruction arrives at certain hop points
+    // on it's way to main memory
+    std::vector<Tick> roundTripTime;
+
+    // hold each cache block address for the instruction and a vector
+    // to hold the tick when the block arrives at certain hop points
+    std::map<Addr, std::vector<Tick>> lineAddressTime;
 };
 
 #endif // __GPU_DYN_INST_HH__

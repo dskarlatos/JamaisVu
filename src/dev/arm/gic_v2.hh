@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2013, 2015-2019 ARM Limited
+ * Copyright (c) 2010, 2013, 2015-2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -48,6 +48,7 @@
 
 #include <vector>
 
+#include "arch/arm/interrupts.hh"
 #include "base/addr_range.hh"
 #include "base/bitunion.hh"
 #include "cpu/intr_control.hh"
@@ -192,6 +193,10 @@ class GicV2 : public BaseGic, public BaseGicRegisters
          * interrupt group bits for first 32 interrupts, 1b per interrupt */
         uint32_t intGroup;
 
+        /** GICD_ICFGR0, GICD_ICFGR1
+         * interrupt config bits for first 32 interrupts, 2b per interrupt */
+        uint32_t intConfig[2];
+
         /** GICD_IPRIORITYR{0..7}
          * interrupt priority for SGIs and PPIs */
         uint8_t intPriority[SGI_MAX + PPI_MAX];
@@ -201,7 +206,7 @@ class GicV2 : public BaseGic, public BaseGicRegisters
 
         BankedRegs() :
             intEnabled(0), pendingInt(0), activeInt(0),
-            intGroup(0), intPriority {0}
+            intGroup(0), intConfig {0}, intPriority {0}
           {}
     };
     std::vector<BankedRegs*> bankedRegs;
@@ -213,7 +218,9 @@ class GicV2 : public BaseGic, public BaseGicRegisters
      * 1b per interrupt, 32 bits per word, 31 words */
     uint32_t intEnabled[INT_BITS_MAX-1];
 
-    uint32_t& getIntEnabled(ContextID ctx, uint32_t ix) {
+    uint32_t&
+    getIntEnabled(ContextID ctx, uint32_t ix)
+    {
         if (ix == 0) {
             return getBankedRegs(ctx).intEnabled;
         } else {
@@ -226,7 +233,9 @@ class GicV2 : public BaseGic, public BaseGicRegisters
      * 1b per interrupt, 32 bits per word, 31 words */
     uint32_t pendingInt[INT_BITS_MAX-1];
 
-    uint32_t& getPendingInt(ContextID ctx, uint32_t ix) {
+    uint32_t&
+    getPendingInt(ContextID ctx, uint32_t ix)
+    {
         assert(ix < INT_BITS_MAX);
         if (ix == 0) {
             return getBankedRegs(ctx).pendingInt;
@@ -240,7 +249,9 @@ class GicV2 : public BaseGic, public BaseGicRegisters
      * 1b per interrupt, 32 bits per word, 31 words */
     uint32_t activeInt[INT_BITS_MAX-1];
 
-    uint32_t& getActiveInt(ContextID ctx, uint32_t ix) {
+    uint32_t&
+    getActiveInt(ContextID ctx, uint32_t ix)
+    {
         assert(ix < INT_BITS_MAX);
         if (ix == 0) {
             return getBankedRegs(ctx).activeInt;
@@ -254,7 +265,9 @@ class GicV2 : public BaseGic, public BaseGicRegisters
      * 1b per interrupt, 32 bits per word, 31 words */
     uint32_t intGroup[INT_BITS_MAX-1];
 
-    uint32_t& getIntGroup(ContextID ctx, uint32_t ix) {
+    uint32_t&
+    getIntGroup(ContextID ctx, uint32_t ix)
+    {
         assert(ix < INT_BITS_MAX);
         if (ix == 0) {
             return getBankedRegs(ctx).intGroup;
@@ -272,7 +285,9 @@ class GicV2 : public BaseGic, public BaseGicRegisters
      */
     uint8_t intPriority[GLOBAL_INT_LINES];
 
-    uint8_t& getIntPriority(ContextID ctx, uint32_t ix) {
+    uint8_t&
+    getIntPriority(ContextID ctx, uint32_t ix)
+    {
         assert(ix < INT_LINES_MAX);
         if (ix < SGI_MAX + PPI_MAX) {
             return getBankedRegs(ctx).intPriority[ix];
@@ -281,14 +296,28 @@ class GicV2 : public BaseGic, public BaseGicRegisters
         }
     }
 
-    /** GICD_ICFGRn
-     * get 2 bit config associated to an interrupt.
+    /**
+     * GICD_ICFGR{2...63}
+     * 2 bit per interrupt signaling if it's level or edge sensitive
+     * and if it is 1:N or N:N */
+    uint32_t intConfig[INT_BITS_MAX*2 - 2];
+
+    /**
+     * Reads the GICD_ICFGRn register.
+     * @param ctx context id (PE specific)
+     * @param ix interrupt word index
+     * @returns the interrupt config word
      */
-    uint8_t getIntConfig(ContextID ctx, uint32_t ix) {
-        assert(ix < INT_LINES_MAX);
-        const uint8_t cfg_low = intNumToBit(ix * 2);
-        const uint8_t cfg_hi = cfg_low + 1;
-        return bits(intConfig[intNumToWord(ix * 2)], cfg_hi, cfg_low);
+    uint32_t&
+    getIntConfig(ContextID ctx, uint32_t ix)
+    {
+        assert(ix < INT_BITS_MAX*2);
+        if (ix < 2) {
+            /** SGIs and PPIs **/
+            return getBankedRegs(ctx).intConfig[ix];
+        } else {
+            return intConfig[ix - 2];
+        }
     }
 
     /** GICD_ITARGETSR{8..255}
@@ -296,8 +325,10 @@ class GicV2 : public BaseGic, public BaseGicRegisters
      */
     uint8_t cpuTarget[GLOBAL_INT_LINES];
 
-    uint8_t getCpuTarget(ContextID ctx, uint32_t ix) {
-        assert(ctx < sys->numRunningContexts());
+    uint8_t
+    getCpuTarget(ContextID ctx, uint32_t ix) const
+    {
+        assert(ctx < sys->threads.numRunning());
         assert(ix < INT_LINES_MAX);
         if (ix < SGI_MAX + PPI_MAX) {
             // "GICD_ITARGETSR0 to GICD_ITARGETSR7 are read-only, and each
@@ -319,19 +350,21 @@ class GicV2 : public BaseGic, public BaseGicRegisters
         }
     }
 
-    /** 2 bit per interrupt signaling if it's level or edge sensitive
-     * and if it is 1:N or N:N */
-    uint32_t intConfig[INT_BITS_MAX*2];
-
-    bool isLevelSensitive(ContextID ctx, uint32_t ix) {
-        if (ix == SPURIOUS_INT) {
+    bool
+    isLevelSensitive(ContextID ctx, uint32_t int_num)
+    {
+        if (int_num == SPURIOUS_INT) {
             return false;
         } else {
-            return bits(getIntConfig(ctx, ix), 1) == 0;
+            const auto ix = intNumToWord(int_num * 2);
+            const uint8_t cfg_hi = intNumToBit(int_num * 2) + 1;
+            return bits(getIntConfig(ctx, ix), cfg_hi) == 0;
         }
     }
 
-    bool isGroup0(ContextID ctx, uint32_t int_num) {
+    bool
+    isGroup0(ContextID ctx, uint32_t int_num)
+    {
         const uint32_t group_reg = getIntGroup(ctx, intNumToWord(int_num));
         return !bits(group_reg, intNumToBit(int_num));
     }
@@ -346,7 +379,9 @@ class GicV2 : public BaseGic, public BaseGicRegisters
      * 2) GICC_CTLR.FIQEn: controls whether the CPU interface signals Group 0
      * interrupts to a target processor using the FIQ or the IRQ signal
      */
-    bool isFiq(ContextID ctx, uint32_t int_num) {
+    bool
+    isFiq(ContextID ctx, uint32_t int_num)
+    {
         const bool is_group0 = isGroup0(ctx, int_num);
         const bool use_fiq = cpuControl[ctx].fiqEn;
 
@@ -360,7 +395,9 @@ class GicV2 : public BaseGic, public BaseGicRegisters
     /** CPU enabled:
      * Checks if GICC_CTLR.EnableGrp0 or EnableGrp1 are set
      */
-    bool cpuEnabled(ContextID ctx) const {
+    bool
+    cpuEnabled(ContextID ctx) const
+    {
         return cpuControl[ctx].enableGrp0 ||
                cpuControl[ctx].enableGrp1;
     }
@@ -482,7 +519,9 @@ class GicV2 : public BaseGic, public BaseGicRegisters
     Tick readDistributor(PacketPtr pkt);
     uint32_t readDistributor(ContextID ctx, Addr daddr,
                              size_t resp_sz);
-    uint32_t readDistributor(ContextID ctx, Addr daddr) override {
+    uint32_t
+    readDistributor(ContextID ctx, Addr daddr) override
+    {
         return readDistributor(ctx, daddr, 4);
     }
 
@@ -498,8 +537,9 @@ class GicV2 : public BaseGic, public BaseGicRegisters
     Tick writeDistributor(PacketPtr pkt);
     void writeDistributor(ContextID ctx, Addr daddr,
                           uint32_t data, size_t data_sz);
-    void writeDistributor(ContextID ctx, Addr daddr,
-                                  uint32_t data) override {
+    void
+    writeDistributor(ContextID ctx, Addr daddr, uint32_t data) override
+    {
         return writeDistributor(ctx, daddr, data, 4);
     }
 

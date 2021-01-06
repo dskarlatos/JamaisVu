@@ -170,6 +170,10 @@
                     0x22: m5fail({{
                         PseudoInst::m5fail(xc->tcBase(), Rdi, Rsi);
                     }}, IsNonSpeculative);
+                    0x23: m5sum({{
+                        Rax = PseudoInst::m5sum(xc->tcBase(),
+                                Rdi, Rsi, Rdx, Rcx, R8, R9);
+                    }}, IsNonSpeculative);
                     0x30: m5initparam({{
                         Rax = PseudoInst::initParam(xc->tcBase(), Rdi, Rsi);
                     }}, IsNonSpeculative);
@@ -233,9 +237,9 @@
                 }
             }
             0x05: decode FullSystemInt {
-                0: SyscallInst::syscall('xc->syscall(&fault)',
-                                        IsSyscall, IsNonSpeculative,
-                                        IsSerializeAfter);
+                0: SyscallInst::syscall({{
+                    return std::make_shared<SESyscallFault>();
+                }});
                 default: decode MODE_MODE {
                     0x0: decode MODE_SUBMODE {
                         0x0: Inst::SYSCALL_64();
@@ -427,9 +431,9 @@
             0x2: Inst::RDMSR();
             0x3: rdpmc();
             0x4: decode FullSystemInt {
-                0: SyscallInst::sysenter('xc->syscall(&fault)',
-                                         IsSyscall, IsNonSpeculative,
-                                         IsSerializeAfter);
+                0: SyscallInst::sysenter({{
+                    return std::make_shared<SESyscallFault>();
+                }});
                 default: sysenter();
             }
             0x5: sysexit();

@@ -55,12 +55,12 @@ class Wavefront;
 class LocalMemPipeline
 {
   public:
-    LocalMemPipeline(const ComputeUnitParams *params);
-    void init(ComputeUnit *cu);
+    LocalMemPipeline(const ComputeUnitParams *p, ComputeUnit &cu);
     void exec();
-
-    std::queue<GPUDynInstPtr> &getLMReqFIFO() { return lmIssuedRequests; }
     std::queue<GPUDynInstPtr> &getLMRespFIFO() { return lmReturnedRequests; }
+
+    void issueRequest(GPUDynInstPtr gpuDynInst);
+
 
     bool
     isLMRespFIFOWrRdy() const
@@ -84,8 +84,8 @@ class LocalMemPipeline
     }
 
   private:
-    ComputeUnit *computeUnit;
-    std::string _name;
+    ComputeUnit &computeUnit;
+    const std::string _name;
     int lmQueueSize;
     Stats::Scalar loadVrfBankConflictCycles;
     // Local Memory Request Fifo: all shared memory requests

@@ -34,15 +34,10 @@
 #include "arch/sparc/isa_traits.hh"
 #include "base/bitfield.hh"
 #include "base/logging.hh"
+#include "sim/serialize.hh"
 
-class Checkpoint;
-
-namespace SparcISA {
-
-struct VAddr
+namespace SparcISA
 {
-    VAddr(Addr a) { panic("not implemented yet."); }
-};
 
 class TteTag
 {

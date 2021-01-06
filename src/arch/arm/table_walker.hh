@@ -229,7 +229,7 @@ class TableWalker : public ClockedObject
          */
         bool secure(bool have_security, WalkerState *currState) const
         {
-            if (have_security) {
+            if (have_security && currState->secureLookup) {
                 if (type() == PageTable)
                     return !bits(data, 3);
                 else
@@ -829,8 +829,8 @@ class TableWalker : public ClockedObject
     /** Port shared by the two table walkers. */
     DmaPort* port;
 
-    /** Master id assigned by the MMU. */
-    MasterID masterId;
+    /** Requestor id assigned by the MMU. */
+    RequestorID requestorId;
 
     /** Indicates whether this table walker is part of the stage 2 mmu */
     const bool isStage2;
@@ -858,18 +858,21 @@ class TableWalker : public ClockedObject
     bool _haveLargeAsid64;
 
     /** Statistics */
-    Stats::Scalar statWalks;
-    Stats::Scalar statWalksShortDescriptor;
-    Stats::Scalar statWalksLongDescriptor;
-    Stats::Vector statWalksShortTerminatedAtLevel;
-    Stats::Vector statWalksLongTerminatedAtLevel;
-    Stats::Scalar statSquashedBefore;
-    Stats::Scalar statSquashedAfter;
-    Stats::Histogram statWalkWaitTime;
-    Stats::Histogram statWalkServiceTime;
-    Stats::Histogram statPendingWalks; // essentially "L" of queueing theory
-    Stats::Vector statPageSizes;
-    Stats::Vector2d statRequestOrigin;
+   struct TableWalkerStats : public Stats::Group {
+        TableWalkerStats(Stats::Group *parent);
+        Stats::Scalar walks;
+        Stats::Scalar walksShortDescriptor;
+        Stats::Scalar walksLongDescriptor;
+        Stats::Vector walksShortTerminatedAtLevel;
+        Stats::Vector walksLongTerminatedAtLevel;
+        Stats::Scalar squashedBefore;
+        Stats::Scalar squashedAfter;
+        Stats::Histogram walkWaitTime;
+        Stats::Histogram walkServiceTime;
+        Stats::Histogram pendingWalks; // essentially "L" of queueing theory
+        Stats::Vector pageSizes;
+        Stats::Vector2d requestOrigin;
+    } stats;
 
     mutable unsigned pendingReqs;
     mutable Tick pendingChangeTick;
@@ -901,8 +904,6 @@ class TableWalker : public ClockedObject
     Port &getPort(const std::string &if_name,
                   PortID idx=InvalidPortID) override;
 
-    void regStats() override;
-
     Fault walk(const RequestPtr &req, ThreadContext *tc,
                uint16_t asid, uint8_t _vmid,
                bool _isHyp, TLB::Mode mode, TLB::Translation *_trans,
@@ -911,7 +912,7 @@ class TableWalker : public ClockedObject
 
     void setTlb(TLB *_tlb) { tlb = _tlb; }
     TLB* getTlb() { return tlb; }
-    void setMMU(Stage2MMU *m, MasterID master_id);
+    void setMMU(Stage2MMU *m, RequestorID requestor_id);
     void memAttrs(ThreadContext *tc, TlbEntry &te, SCTLR sctlr,
                   uint8_t texcb, bool s);
     void memAttrsLPAE(ThreadContext *tc, TlbEntry &te,

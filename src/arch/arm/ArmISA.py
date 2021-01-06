@@ -1,4 +1,4 @@
-# Copyright (c) 2012-2013, 2015-2019 ARM Limited
+# Copyright (c) 2012-2013, 2015-2020 ARM Limited
 # All rights reserved.
 #
 # The license below extends only to copyright in the software and shall
@@ -90,26 +90,26 @@ class ArmISA(BaseISA):
     id_aa64afr1_el1 = Param.UInt64(0x0000000000000000,
         "AArch64 Auxiliary Feature Register 1")
 
-    # 1 CTX CMPs | 2 WRPs | 2 BRPs | !PMU | !Trace | Debug v8-A
-    id_aa64dfr0_el1 = Param.UInt64(0x0000000000101006,
+    # 1 CTX CMPs | 16 WRPs | 16 BRPs | !PMU | !Trace | Debug v8-A
+    id_aa64dfr0_el1 = Param.UInt64(0x0000000000F0F006,
         "AArch64 Debug Feature Register 0")
     # Reserved for future expansion
     id_aa64dfr1_el1 = Param.UInt64(0x0000000000000000,
         "AArch64 Debug Feature Register 1")
 
-    # !CRC32 | !SHA2 | !SHA1 | !AES
+    # !TME | !Atomic | !CRC32 | !SHA2 | !SHA1 | !AES
     id_aa64isar0_el1 = Param.UInt64(0x0000000000000000,
         "AArch64 Instruction Set Attribute Register 0")
 
-    # GPI = 0x0 | GPA = 0x1| API=0x0 | APA=0x1 | FCMA
-    id_aa64isar1_el1 = Param.UInt64(0x0000000001010010,
+    # GPI = 0x0 | GPA = 0x1 | API=0x0 | FCMA | JSCVT | APA=0x1
+    id_aa64isar1_el1 = Param.UInt64(0x0000000001011010,
         "AArch64 Instruction Set Attribute Register 1")
 
     # 4K | 64K | !16K | !BigEndEL0 | !SNSMem | !BigEnd | 8b ASID | 40b PA
     id_aa64mmfr0_el1 = Param.UInt64(0x0000000000f00002,
         "AArch64 Memory Model Feature Register 0")
-    # PAN | HPDS
-    id_aa64mmfr1_el1 = Param.UInt64(0x0000000000101000,
+    # PAN | HPDS | VHE
+    id_aa64mmfr1_el1 = Param.UInt64(0x0000000000101100,
         "AArch64 Memory Model Feature Register 1")
     id_aa64mmfr2_el1 = Param.UInt64(0x0000000000000000,
         "AArch64 Memory Model Feature Register 2")

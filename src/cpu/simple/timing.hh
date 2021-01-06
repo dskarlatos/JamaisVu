@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013,2015,2018 ARM Limited
+ * Copyright (c) 2012-2013,2015,2018,2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -155,12 +155,12 @@ class TimingSimpleCPU : public BaseSimpleCPU
      * scheduling of handling of incoming packets in the following
      * cycle.
      */
-    class TimingCPUPort : public MasterPort
+    class TimingCPUPort : public RequestPort
     {
       public:
 
         TimingCPUPort(const std::string& _name, TimingSimpleCPU* _cpu)
-            : MasterPort(_name, _cpu), cpu(_cpu),
+            : RequestPort(_name, _cpu), cpu(_cpu),
               retryRespEvent([this]{ sendRetryResp(); }, name())
         { }
 
@@ -319,6 +319,11 @@ class TimingSimpleCPU : public BaseSimpleCPU
      * @param state The DTB translation state.
      */
     void finishTranslation(WholeTranslationState *state);
+
+    /** hardware transactional memory **/
+    Fault initiateHtmCmd(Request::Flags flags) override;
+
+    void htmSendAbortSignal(HtmFailureFaultCause) override;
 
   private:
 

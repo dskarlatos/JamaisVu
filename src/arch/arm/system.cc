@@ -53,6 +53,7 @@
 
 using namespace std;
 using namespace Linux;
+using namespace ArmISA;
 
 ArmSystem::ArmSystem(Params *p)
     : System(p),
@@ -66,10 +67,12 @@ ArmSystem::ArmSystem(Params *p)
       _highestELIs64(p->highest_el_is_64),
       _physAddrRange64(p->phys_addr_range_64),
       _haveLargeAsid64(p->have_large_asid_64),
+      _haveTME(p->have_tme),
       _haveSVE(p->have_sve),
       _sveVL(p->sve_vl),
       _haveLSE(p->have_lse),
       _havePAN(p->have_pan),
+      _haveSecEL2(p->have_secel2),
       semihosting(p->semihosting),
       multiProc(p->multi_proc)
 {
@@ -143,6 +146,12 @@ ArmSystem::haveEL(ThreadContext *tc, ExceptionLevel el)
         warn("Unimplemented Exception Level\n");
         return false;
     }
+}
+
+bool
+ArmSystem::haveTME(ThreadContext *tc)
+{
+    return getArmSystem(tc)->haveTME();
 }
 
 Addr

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 ARM Limited
+ * Copyright (c) 2019-2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -45,6 +45,8 @@
 #include "dev/arm/gic_v3_cpu_interface.hh"
 #include "dev/arm/gic_v3_distributor.hh"
 
+using namespace ArmISA;
+
 const AddrRange Gicv3Redistributor::GICR_IPRIORITYR(SGI_base + 0x0400,
                                                     SGI_base + 0x0420);
 
@@ -58,6 +60,7 @@ Gicv3Redistributor::Gicv3Redistributor(Gicv3 * gic, uint32_t cpu_id)
       irqGroup(Gicv3::SGI_MAX + Gicv3::PPI_MAX, 0),
       irqEnabled(Gicv3::SGI_MAX + Gicv3::PPI_MAX, false),
       irqPending(Gicv3::SGI_MAX + Gicv3::PPI_MAX, false),
+      irqPendingIspendr(Gicv3::SGI_MAX + Gicv3::PPI_MAX, false),
       irqActive(Gicv3::SGI_MAX + Gicv3::PPI_MAX, false),
       irqPriority(Gicv3::SGI_MAX + Gicv3::PPI_MAX, 0),
       irqConfig(Gicv3::SGI_MAX + Gicv3::PPI_MAX, Gicv3::INT_EDGE_TRIGGERED),
@@ -158,7 +161,7 @@ Gicv3Redistributor::read(Addr addr, size_t size, bool is_secure_access)
            * (physical LPIs supported)
            */
           uint64_t affinity = getAffinity();
-          int last = cpuId == (gic->getSystem()->numContexts() - 1);
+          int last = cpuId == (gic->getSystem()->threads.size() - 1);
           return (affinity << 32) | (1 << 24) | (cpuId << 8) |
               (1 << 5) | (last << 4) | (1 << 3) | (1 << 0);
       }
@@ -509,6 +512,7 @@ Gicv3Redistributor::write(Addr addr, uint64_t data, size_t size,
                         "(GICR_ISPENDR0): int_id %d (PPI) "
                         "pending bit set\n", int_id);
                 irqPending[int_id] = true;
+                irqPendingIspendr[int_id] = true;
             }
         }
 
@@ -526,7 +530,7 @@ Gicv3Redistributor::write(Addr addr, uint64_t data, size_t size,
 
             bool clear = data & (1 << int_id) ? 1 : 0;
 
-            if (clear) {
+            if (clear && treatAsEdgeTriggered(int_id)) {
                 irqPending[int_id] = false;
             }
         }
@@ -710,9 +714,21 @@ Gicv3Redistributor::sendPPInt(uint32_t int_id)
     assert((int_id >= Gicv3::SGI_MAX) &&
            (int_id < Gicv3::SGI_MAX + Gicv3::PPI_MAX));
     irqPending[int_id] = true;
+    irqPendingIspendr[int_id] = false;
     DPRINTF(GIC, "Gicv3Redistributor::sendPPInt(): "
             "int_id %d (PPI) pending bit set\n", int_id);
     updateDistributor();
+}
+
+void
+Gicv3Redistributor::clearPPInt(uint32_t int_id)
+{
+    assert((int_id >= Gicv3::SGI_MAX) &&
+           (int_id < Gicv3::SGI_MAX + Gicv3::PPI_MAX));
+
+    if (isLevelSensitive(int_id)) {
+        irqPending[int_id] = false;
+    }
 }
 
 void
@@ -747,6 +763,7 @@ Gicv3Redistributor::sendSGI(uint32_t int_id, Gicv3::GroupId group, bool ns)
     if (!forward) return;
 
     irqPending[int_id] = true;
+    irqPendingIspendr[int_id] = false;
     DPRINTF(GIC, "Gicv3ReDistributor::sendSGI(): "
             "int_id %d (SGI) pending bit set\n", int_id);
     updateDistributor();
@@ -977,7 +994,9 @@ Gicv3Redistributor::getIntGroup(int int_id) const
 void
 Gicv3Redistributor::activateIRQ(uint32_t int_id)
 {
-    irqPending[int_id] = false;
+    if (treatAsEdgeTriggered(int_id)) {
+        irqPending[int_id] = false;
+    }
     irqActive[int_id] = true;
 }
 
@@ -990,7 +1009,7 @@ Gicv3Redistributor::deactivateIRQ(uint32_t int_id)
 uint32_t
 Gicv3Redistributor::getAffinity() const
 {
-    ThreadContext * tc = gic->getSystem()->getThreadContext(cpuId);
+    ThreadContext *tc = gic->getSystem()->threads[cpuId];
     uint64_t mpidr = getMPIDR(gic->getSystem(), tc);
     /*
      * Aff3 = MPIDR[39:32]
@@ -1037,6 +1056,7 @@ Gicv3Redistributor::serialize(CheckpointOut & cp) const
     SERIALIZE_CONTAINER(irqGroup);
     SERIALIZE_CONTAINER(irqEnabled);
     SERIALIZE_CONTAINER(irqPending);
+    SERIALIZE_CONTAINER(irqPendingIspendr);
     SERIALIZE_CONTAINER(irqActive);
     SERIALIZE_CONTAINER(irqPriority);
     SERIALIZE_CONTAINER(irqConfig);
@@ -1058,6 +1078,7 @@ Gicv3Redistributor::unserialize(CheckpointIn & cp)
     UNSERIALIZE_CONTAINER(irqGroup);
     UNSERIALIZE_CONTAINER(irqEnabled);
     UNSERIALIZE_CONTAINER(irqPending);
+    UNSERIALIZE_CONTAINER(irqPendingIspendr);
     UNSERIALIZE_CONTAINER(irqActive);
     UNSERIALIZE_CONTAINER(irqPriority);
     UNSERIALIZE_CONTAINER(irqConfig);

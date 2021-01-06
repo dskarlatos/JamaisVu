@@ -70,18 +70,15 @@ SparcSolarisObjectFileLoader loader;
 
 /// Target uname() handler.
 static SyscallReturn
-unameFunc(SyscallDesc *desc, ThreadContext *tc, Addr utsname)
+unameFunc(SyscallDesc *desc, ThreadContext *tc, VPtr<Solaris::utsname> name)
 {
     auto process = tc->getProcessPtr();
-    TypedBufferArg<Solaris::utsname> name(utsname);
 
     strcpy(name->sysname, "SunOS");
     strcpy(name->nodename, "m5.eecs.umich.edu");
     strcpy(name->release, process->release.c_str());
     strcpy(name->version, "Generic_118558-21");
     strcpy(name->machine, "sun4u");
-
-    name.copyOut(tc->getVirtProxy());
 
     return 0;
 }
@@ -353,8 +350,8 @@ SparcSolarisProcess::SparcSolarisProcess(ProcessParams *params,
 {}
 
 void
-SparcSolarisProcess::syscall(ThreadContext *tc, Fault *fault)
+SparcSolarisProcess::syscall(ThreadContext *tc)
 {
-    Sparc64Process::syscall(tc, fault);
-    syscallDescs.get(tc->readIntReg(1))->doSyscall(tc, fault);
+    Sparc64Process::syscall(tc);
+    syscallDescs.get(tc->readIntReg(1))->doSyscall(tc);
 }

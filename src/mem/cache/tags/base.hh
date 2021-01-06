@@ -253,7 +253,7 @@ class BaseTags : public ClockedObject
         assert(blk);
         assert(blk->isValid());
 
-        stats.occupancies[blk->srcMasterId]--;
+        stats.occupancies[blk->srcRequestorId]--;
         stats.totalRefs += blk->refCount;
         stats.sampledRefs++;
 
@@ -351,14 +351,6 @@ class BaseTags : public ClockedObject
      * @param blk The input block
      */
     void computeStatsVisitor(CacheBlk &blk);
-};
-
-class BaseTagsCallback : public Callback
-{
-    BaseTags *tags;
-  public:
-    BaseTagsCallback(BaseTags *t) : tags(t) {}
-    virtual void process() { tags->cleanupRefs(); };
 };
 
 #endif //__MEM_CACHE_TAGS_BASE_HH__

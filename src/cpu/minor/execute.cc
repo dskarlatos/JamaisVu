@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014,2018-2019 ARM Limited
+ * Copyright (c) 2013-2014,2018-2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -48,6 +48,7 @@
 #include "debug/Activity.hh"
 #include "debug/Branch.hh"
 #include "debug/Drain.hh"
+#include "debug/ExecFaulting.hh"
 #include "debug/MinorExecute.hh"
 #include "debug/MinorInterrupt.hh"
 #include "debug/MinorMem.hh"
@@ -409,7 +410,7 @@ Execute::handleMemResponse(MinorDynInstPtr inst,
 bool
 Execute::isInterrupted(ThreadID thread_id) const
 {
-    return cpu.checkInterrupts(cpu.getContext(thread_id));
+    return cpu.checkInterrupts(thread_id);
 }
 
 bool
@@ -418,13 +419,11 @@ Execute::takeInterrupt(ThreadID thread_id, BranchData &branch)
     DPRINTF(MinorInterrupt, "Considering interrupt status from PC: %s\n",
         cpu.getContext(thread_id)->pcState());
 
-    Fault interrupt = cpu.getInterruptController(thread_id)->getInterrupt
-        (cpu.getContext(thread_id));
+    Fault interrupt = cpu.getInterruptController(thread_id)->getInterrupt();
 
     if (interrupt != NoFault) {
         /* The interrupt *must* set pcState */
-        cpu.getInterruptController(thread_id)->updateIntrInfo
-            (cpu.getContext(thread_id));
+        cpu.getInterruptController(thread_id)->updateIntrInfo();
         interrupt->invoke(cpu.getContext(thread_id));
 
         assert(!lsq.accessesInFlight());
@@ -866,7 +865,7 @@ Execute::doInstCommitAccounting(MinorDynInstPtr inst)
     if (!inst->staticInst->isMicroop() || inst->staticInst->isLastMicroop())
     {
         thread->numInst++;
-        thread->numInsts++;
+        thread->threadStats.numInsts++;
         cpu.stats.numInsts++;
         cpu.system->totalNumInsts++;
 
@@ -874,7 +873,7 @@ Execute::doInstCommitAccounting(MinorDynInstPtr inst)
         thread->comInstEventQueue.serviceEvents(thread->numInst);
     }
     thread->numOp++;
-    thread->numOps++;
+    thread->threadStats.numOps++;
     cpu.stats.numOps++;
     cpu.stats.committedInstType[inst->id.threadId]
                                [inst->staticInst->opClass()]++;
@@ -980,6 +979,15 @@ Execute::commitInst(MinorDynInstPtr inst, bool early_memory_issue,
         committed = true;
 
         if (fault != NoFault) {
+            if (inst->traceData) {
+                if (DTRACE(ExecFaulting)) {
+                    inst->traceData->setFaulting(true);
+                } else {
+                    delete inst->traceData;
+                    inst->traceData = NULL;
+                }
+            }
+
             DPRINTF(MinorExecute, "Fault in execute of inst: %s fault: %s\n",
                 *inst, fault->name());
             fault->invoke(thread, inst->staticInst);

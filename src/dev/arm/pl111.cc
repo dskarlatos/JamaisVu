@@ -182,7 +182,7 @@ Pl111::read(PacketPtr pkt)
       default:
         if (readId(pkt, AMBA_ID, pioAddr)) {
             // Hack for variable size accesses
-            data = pkt->getLE<uint32_t>();
+            data = pkt->getUintX(ByteOrder::little);
             break;
         } else if (daddr >= CrsrImage && daddr <= 0xBFC) {
             // CURSOR IMAGE
@@ -203,21 +203,7 @@ Pl111::read(PacketPtr pkt)
         }
     }
 
-    switch(pkt->getSize()) {
-      case 1:
-        pkt->setLE<uint8_t>(data);
-        break;
-      case 2:
-        pkt->setLE<uint16_t>(data);
-        break;
-      case 4:
-        pkt->setLE<uint32_t>(data);
-        break;
-      default:
-        panic("CLCD controller read size too big?\n");
-        break;
-    }
-
+    pkt->setUintX(data, ByteOrder::little);
     pkt->makeAtomicResponse();
     return pioDelay;
 }
@@ -229,22 +215,7 @@ Pl111::write(PacketPtr pkt)
     // use a temporary data since the LCD registers are read/written with
     // different size operations
     //
-    uint32_t data = 0;
-
-    switch(pkt->getSize()) {
-      case 1:
-        data = pkt->getLE<uint8_t>();
-        break;
-      case 2:
-        data = pkt->getLE<uint16_t>();
-        break;
-      case 4:
-        data = pkt->getLE<uint32_t>();
-        break;
-      default:
-        panic("PL111 CLCD controller write size too big?\n");
-        break;
-    }
+    const uint32_t data = pkt->getUintX(ByteOrder::little);
 
     assert(pkt->getAddr() >= pioAddr &&
            pkt->getAddr() < pioAddr + pioSize);
@@ -303,7 +274,7 @@ Pl111::write(PacketPtr pkt)
         lcdMis = lcdImsc & lcdRis;
 
         if (!lcdMis)
-            gic->clearInt(intNum);
+            interrupt->clear();
 
          break;
       case LcdRis:
@@ -317,7 +288,7 @@ Pl111::write(PacketPtr pkt)
         lcdMis = lcdImsc & lcdRis;
 
         if (!lcdMis)
-            gic->clearInt(intNum);
+            interrupt->clear();
 
         break;
       case LcdUpCurr:
@@ -412,13 +383,13 @@ Pl111::pixelConverter() const
             bytesPerPixel,
             offsets[2], offsets[1], offsets[0],
             rw, gw, bw,
-            LittleEndianByteOrder);
+            ByteOrder::little);
     } else {
         return PixelConverter(
             bytesPerPixel,
             offsets[0], offsets[1], offsets[2],
             rw, gw, bw,
-            LittleEndianByteOrder);
+            ByteOrder::little);
     }
 }
 
@@ -759,7 +730,7 @@ Pl111::generateInterrupt()
     lcdMis = lcdImsc & lcdRis;
 
     if (lcdMis.underflow || lcdMis.baseaddr || lcdMis.vcomp || lcdMis.ahbmaster) {
-        gic->sendInt(intNum);
+        interrupt->raise();
         DPRINTF(PL111, " -- Generated\n");
     }
 }

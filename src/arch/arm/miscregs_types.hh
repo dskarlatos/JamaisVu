@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2019 ARM Limited
+ * Copyright (c) 2010-2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -650,7 +650,12 @@ namespace ArmISA
         Bitfield<39, 12> pa;
         Bitfield<11>     lpae;
         Bitfield<9>      ns;
+        Bitfield<9>      s;
         Bitfield<8, 7>   sh;
+        Bitfield<8>      ptw;
+        Bitfield<6, 1>   fst;
+        Bitfield<6>      fs5;
+        Bitfield<5, 1>   fs4_0;
         Bitfield<0>      f;
    EndBitUnion(PAR)
 
@@ -662,7 +667,11 @@ namespace ArmISA
 
    BitUnion32(CPTR)
         Bitfield<31> tcpac;
+        Bitfield<30> tam;
+        Bitfield<28> tta_e2h;
+        Bitfield<21, 20> fpen;
         Bitfield<20> tta;
+        Bitfield<17, 16> zen;
         Bitfield<13, 12> res1_13_12_el2;
         Bitfield<10> tfp;
         Bitfield<9> res1_9_el2;
@@ -675,6 +684,104 @@ namespace ArmISA
     BitUnion64(ZCR)
         Bitfield<3, 0> len;
     EndBitUnion(ZCR)
+
+   BitUnion32(OSL)
+        Bitfield<64, 4> res0;
+        Bitfield<3> oslm_3;
+        Bitfield<2> nTT;
+        Bitfield<1> oslk;
+        Bitfield<0> oslm_0;
+   EndBitUnion(OSL)
+
+   BitUnion64(DBGBCR)
+        Bitfield<63, 24> res0_2;
+        Bitfield<23, 20> bt;
+        Bitfield<19, 16> lbn;
+        Bitfield<15, 14> ssc;
+        Bitfield<13> hmc;
+        Bitfield<12, 9> res0_1;
+        Bitfield<8, 5> bas;
+        Bitfield<4, 3> res0_0;
+        Bitfield<2, 1> pmc;
+        Bitfield<0> e;
+   EndBitUnion(DBGBCR)
+
+    BitUnion64(DBGWCR)
+        Bitfield<63, 29> res0_2;
+        Bitfield<28, 24> mask;
+        Bitfield<23, 21> res0_1;
+        Bitfield<20> wt;
+        Bitfield<19, 16> lbn;
+        Bitfield<15, 14> ssc;
+        Bitfield<13> hmc;
+        Bitfield<12, 5> bas;
+        Bitfield<4, 3> lsv;
+        Bitfield<2, 1> pac;
+        Bitfield<0> e;
+   EndBitUnion(DBGWCR)
+
+   BitUnion32(DBGDS32)
+        Bitfield<31> tfo;
+        Bitfield<30> rxfull;
+        Bitfield<29> txfull;
+        Bitfield<28> res0_5;
+        Bitfield<27> rxo;
+        Bitfield<26> txu;
+        Bitfield<25, 24> res0_4;
+        Bitfield<23, 22> intdis;
+        Bitfield<21> tda;
+        Bitfield<20> res0_3;
+        Bitfield<19> sc2;
+        Bitfield<18> ns;
+        Bitfield<17> spniddis;
+        Bitfield<16> spiddis;
+        Bitfield<15> mdbgen;
+        Bitfield<14> hde;
+        Bitfield<13> res0_;
+        Bitfield<12> udccdis;
+        Bitfield<12> tdcc;
+        Bitfield<11, 7> res0_2;
+        Bitfield<6> err;
+        Bitfield<5, 2> moe;
+        Bitfield<1, 0> res0_1;
+   EndBitUnion(DBGDS32)
+
+   BitUnion32(DBGVCR)
+        Bitfield<31> nsf;
+        Bitfield<30> nsi;
+        Bitfield<29> res0_5;
+        Bitfield<28> nsd;
+        Bitfield<27> nsp;
+        Bitfield<26> nss;
+        Bitfield<25> nsu;
+        Bitfield<24, 16> res0_4;
+        Bitfield<15> mf;
+        Bitfield<14> mi;
+        Bitfield<13> res0_3;
+        Bitfield<12> md;
+        Bitfield<11> mp;
+        Bitfield<10> ms;
+        Bitfield<9,8> res0_2;
+        Bitfield<7> sf;
+        Bitfield<6> si;
+        Bitfield<5> res0_1;
+        Bitfield<4> sd;
+        Bitfield<3> sp;
+        Bitfield<2> ss;
+        Bitfield<1> su;
+        Bitfield<0> res0_0;
+   EndBitUnion(DBGVCR)
+
+   BitUnion32(DEVID)
+        Bitfield<31,28> cidmask;
+        Bitfield<27,24> auxregs;
+        Bitfield<23,20> doublelock;
+        Bitfield<19,16> virtextns;
+        Bitfield<15,12> vectorcatch;
+        Bitfield<11,8>  bpaddremask;
+        Bitfield<7,4>   wpaddrmask;
+        Bitfield<3,0>   pcsample;
+   EndBitUnion(DEVID)
 
 }
 

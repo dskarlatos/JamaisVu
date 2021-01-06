@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014,2017-2018 ARM Limited
+ * Copyright (c) 2013-2014,2017-2018,2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -498,7 +498,7 @@ LSQ::SplitDataRequest::makeFragmentRequests()
         if (byte_enable.empty()) {
             fragment->setVirt(
                 fragment_addr, fragment_size, request->getFlags(),
-                request->masterId(), request->getPC());
+                request->requestorId(), request->getPC());
         } else {
             // Set up byte-enable mask for the current fragment
             auto it_start = byte_enable.begin() +
@@ -508,7 +508,7 @@ LSQ::SplitDataRequest::makeFragmentRequests()
             if (isAnyActiveElement(it_start, it_end)) {
                 fragment->setVirt(
                     fragment_addr, fragment_size, request->getFlags(),
-                    request->masterId(), request->getPC());
+                    request->requestorId(), request->getPC());
                 fragment->setByteEnable(std::vector<bool>(it_start, it_end));
             } else {
                 disabled_fragment = true;
@@ -1029,10 +1029,11 @@ LSQ::tryToSendToTransfers(LSQRequestPtr request)
 
     bool is_load = request->isLoad;
     bool is_llsc = request->request->isLLSC();
+    bool is_release = request->request->isRelease();
     bool is_swap = request->request->isSwap();
     bool is_atomic = request->request->isAtomic();
     bool bufferable = !(request->request->isStrictlyOrdered() ||
-                        is_llsc || is_swap || is_atomic);
+                        is_llsc || is_swap || is_atomic || is_release);
 
     if (is_load) {
         if (numStoresInTransfers != 0) {
@@ -1048,6 +1049,15 @@ LSQ::tryToSendToTransfers(LSQRequestPtr request)
             DPRINTF(MinorMem, "Moving store into transfers queue\n");
             return;
         }
+    }
+
+    // Process store conditionals or store release after all previous
+    // stores are completed
+    if (((!is_load && is_llsc) || is_release) &&
+        !storeBuffer.isDrained()) {
+        DPRINTF(MinorMem, "Memory access needs to wait for store buffer"
+                          " to drain\n");
+        return;
     }
 
     /* Check if this is the head instruction (and so must be executable as
@@ -1635,7 +1645,7 @@ LSQ::pushRequest(MinorDynInstPtr inst, bool isLoad, uint8_t *data,
     int cid = cpu.threads[inst->id.threadId]->getTC()->contextId();
     request->request->setContext(cid);
     request->request->setVirt(
-        addr, size, flags, cpu.dataMasterId(),
+        addr, size, flags, cpu.dataRequestorId(),
         /* I've no idea why we need the PC, but give it */
         inst->pc.instAddr(), std::move(amo_op));
     request->request->setByteEnable(byte_enable);

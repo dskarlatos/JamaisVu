@@ -46,7 +46,7 @@ let {{
     smallFloatTypes = ("uint32_t",)
 
     zeroSveVecRegUpperPartCode = '''
-        TheISA::ISA::zeroSveVecRegUpperPart(%s,
+        ArmISA::ISA::zeroSveVecRegUpperPart(%s,
             ArmStaticInst::getCurSveVecLen<uint64_t>(xc->tcBase()));
     '''
 
@@ -351,7 +351,7 @@ let {{
         global header_output, exec_output
         eWalkCode = simd64EnabledCheckCode + '''
         RegVect srcReg1;
-        BigRegVect destReg;
+        BigRegVect destReg = {};
         '''
         destReg = 0 if not hi else 2
         for reg in range(2):
@@ -632,7 +632,7 @@ let {{
         global header_output, exec_output
         eWalkCode = simd64EnabledCheckCode + '''
         RegVect srcRegs;
-        BigRegVect destReg;
+        BigRegVect destReg = {};
         '''
         for reg in range(rCount):
             eWalkCode += '''

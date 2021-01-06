@@ -60,13 +60,10 @@ env.SwitchingHeaders(
         decoder.hh
         isa.hh
         isa_traits.hh
-        kernel_stats.hh
         locked_mem.hh
-        microcode_rom.hh
         pseudo_inst.hh
         registers.hh
         remote_gdb.hh
-        stacktrace.hh
         types.hh
         utility.hh
         '''),

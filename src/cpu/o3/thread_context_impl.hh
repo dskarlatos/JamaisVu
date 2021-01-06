@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2012, 2016-2017 ARM Limited
+ * Copyright (c) 2010-2012, 2016-2017, 2019 ARM Limited
  * Copyright (c) 2013 Advanced Micro Devices, Inc.
  * All rights reserved
  *
@@ -43,11 +43,9 @@
 #define __CPU_O3_THREAD_CONTEXT_IMPL_HH__
 
 #include "arch/generic/traits.hh"
-#include "arch/kernel_stats.hh"
 #include "arch/registers.hh"
 #include "config/the_isa.hh"
 #include "cpu/o3/thread_context.hh"
-#include "cpu/quiesce_event.hh"
 #include "debug/O3CPU.hh"
 
 template <class Impl>
@@ -55,13 +53,6 @@ PortProxy&
 O3ThreadContext<Impl>::getVirtProxy()
 {
     return thread->getVirtProxy();
-}
-
-template <class Impl>
-void
-O3ThreadContext<Impl>::dumpFuncProfile()
-{
-    thread->dumpFuncProfile();
 }
 
 template <class Impl>
@@ -76,7 +67,6 @@ O3ThreadContext<Impl>::takeOverFrom(ThreadContext *old_context)
     TheISA::Decoder *oldDecoder = old_context->getDecoderPtr();
     newDecoder->takeOverFrom(oldDecoder);
 
-    thread->kernelStats = old_context->getKernelStats();
     thread->funcExeInst = old_context->readFuncExeInst();
 
     thread->noSquashFromTC = false;
@@ -143,16 +133,6 @@ O3ThreadContext<Impl>::halt()
 }
 
 template <class Impl>
-void
-O3ThreadContext<Impl>::regStats(const std::string &name)
-{
-    if (FullSystem) {
-        thread->kernelStats = new TheISA::Kernel::Statistics();
-        thread->kernelStats->regStats(name + ".kern");
-    }
-}
-
-template <class Impl>
 Tick
 O3ThreadContext<Impl>::readLastActivate()
 {
@@ -164,20 +144,6 @@ Tick
 O3ThreadContext<Impl>::readLastSuspend()
 {
     return thread->lastSuspend;
-}
-
-template <class Impl>
-void
-O3ThreadContext<Impl>::profileClear()
-{
-    thread->profileClear();
-}
-
-template <class Impl>
-void
-O3ThreadContext<Impl>::profileSample()
-{
-    thread->profileSample();
 }
 
 template <class Impl>
@@ -200,7 +166,7 @@ template <class Impl>
 void
 O3ThreadContext<Impl>::clearArchRegs()
 {
-    cpu->isa[thread->threadId()]->clear(this);
+    cpu->isa[thread->threadId()]->clear();
 }
 
 template <class Impl>
@@ -357,6 +323,31 @@ O3ThreadContext<Impl>::setMiscReg(RegIndex misc_reg, RegVal val)
     cpu->setMiscReg(misc_reg, val, thread->threadId());
 
     conditionalSquash();
+}
+
+// hardware transactional memory
+template <class Impl>
+void
+O3ThreadContext<Impl>::htmAbortTransaction(uint64_t htmUid,
+                                           HtmFailureFaultCause cause)
+{
+    cpu->htmSendAbortSignal(thread->threadId(), htmUid, cause);
+
+    conditionalSquash();
+}
+
+template <class Impl>
+BaseHTMCheckpointPtr&
+O3ThreadContext<Impl>::getHtmCheckpointPtr()
+{
+    return thread->htmCheckpoint;
+}
+
+template <class Impl>
+void
+O3ThreadContext<Impl>::setHtmCheckpointPtr(BaseHTMCheckpointPtr new_cpt)
+{
+    thread->htmCheckpoint = std::move(new_cpt);
 }
 
 #endif //__CPU_O3_THREAD_CONTEXT_IMPL_HH__

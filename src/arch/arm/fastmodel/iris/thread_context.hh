@@ -59,6 +59,7 @@ class ThreadContext : public ::ThreadContext
     System *_system;
     ::BaseTLB *_dtb;
     ::BaseTLB *_itb;
+    ::BaseISA *_isa;
 
     std::string _irisPath;
     iris::InstanceId _instId = iris::IRIS_UINT64_MAX;
@@ -167,7 +168,7 @@ class ThreadContext : public ::ThreadContext
 
   public:
     ThreadContext(::BaseCPU *cpu, int id, System *system,
-                  ::BaseTLB *dtb, ::BaseTLB *itb,
+                  ::BaseTLB *dtb, ::BaseTLB *itb, ::BaseISA *isa,
                   iris::IrisConnectionInterface *iris_if,
                   const std::string &iris_path);
     virtual ~ThreadContext();
@@ -213,13 +214,7 @@ class ThreadContext : public ::ThreadContext
     BaseISA *
     getIsaPtr() override
     {
-        panic("%s not implemented.", __FUNCTION__);
-    }
-
-    Kernel::Statistics *
-    getKernelStats() override
-    {
-        panic("%s not implemented.", __FUNCTION__);
+        return _isa;
     }
 
     PortProxy &getPhysProxy() override { return *physProxy; }
@@ -244,24 +239,12 @@ class ThreadContext : public ::ThreadContext
     void halt() override { setStatus(Halted); }
 
     void
-    dumpFuncProfile() override
-    {
-        panic("%s not implemented.", __FUNCTION__);
-    }
-
-    void
     takeOverFrom(::ThreadContext *old_context) override
     {
         panic("%s not implemented.", __FUNCTION__);
     }
 
     void regStats(const std::string &name) override {}
-
-    EndQuiesceEvent *
-    getQuiesceEvent() override
-    {
-        panic("%s not implemented.", __FUNCTION__);
-    }
 
     // Not necessarily the best location for these...
     // Having an extra function just to read these is obnoxious
@@ -271,17 +254,6 @@ class ThreadContext : public ::ThreadContext
         panic("%s not implemented.", __FUNCTION__);
     }
     Tick readLastSuspend() override
-    {
-        panic("%s not implemented.", __FUNCTION__);
-    }
-
-    void
-    profileClear() override
-    {
-        panic("%s not implemented.", __FUNCTION__);
-    }
-    void
-    profileSample() override
     {
         panic("%s not implemented.", __FUNCTION__);
     }
@@ -473,12 +445,6 @@ class ThreadContext : public ::ThreadContext
         panic("%s not implemented.", __FUNCTION__);
     }
 
-    void
-    syscall(Fault *fault) override
-    {
-        panic("%s not implemented.", __FUNCTION__);
-    }
-
     /** @{ */
     /**
      * Flat register interfaces
@@ -545,6 +511,24 @@ class ThreadContext : public ::ThreadContext
     void setCCRegFlat(RegIndex idx, RegVal val) override;
     /** @} */
 
+    // hardware transactional memory
+    void
+    htmAbortTransaction(uint64_t htm_uid, HtmFailureFaultCause cause) override
+    {
+        panic("%s not implemented.", __FUNCTION__);
+    }
+
+    BaseHTMCheckpointPtr &
+    getHtmCheckpointPtr() override
+    {
+        panic("%s not implemented.", __FUNCTION__);
+    }
+
+    void
+    setHtmCheckpointPtr(BaseHTMCheckpointPtr cpt) override
+    {
+        panic("%s not implemented.", __FUNCTION__);
+    }
 };
 
 } // namespace Iris

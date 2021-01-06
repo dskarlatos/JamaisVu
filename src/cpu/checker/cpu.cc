@@ -58,7 +58,7 @@ using namespace TheISA;
 void
 CheckerCPU::init()
 {
-    masterId = systemPtr->getMasterId(this);
+    requestorId = systemPtr->getRequestorId(this);
 }
 
 CheckerCPU::CheckerCPU(Params *p)
@@ -99,8 +99,7 @@ CheckerCPU::setSystem(System *system)
     systemPtr = system;
 
     if (FullSystem) {
-        thread = new SimpleThread(this, 0, systemPtr, itb, dtb,
-                                  p->isa[0], false);
+        thread = new SimpleThread(this, 0, systemPtr, itb, dtb, p->isa[0]);
     } else {
         thread = new SimpleThread(this, 0, systemPtr,
                                   workload.size() ? workload[0] : NULL,
@@ -109,19 +108,18 @@ CheckerCPU::setSystem(System *system)
 
     tc = thread->getTC();
     threadContexts.push_back(tc);
-    thread->kernelStats = NULL;
     // Thread should never be null after this
     assert(thread != NULL);
 }
 
 void
-CheckerCPU::setIcachePort(MasterPort *icache_port)
+CheckerCPU::setIcachePort(RequestPort *icache_port)
 {
     icachePort = icache_port;
 }
 
 void
-CheckerCPU::setDcachePort(MasterPort *dcache_port)
+CheckerCPU::setDcachePort(RequestPort *dcache_port)
 {
     dcachePort = dcache_port;
 }
@@ -156,13 +154,13 @@ CheckerCPU::genMemFragmentRequest(Addr frag_addr, int size,
         auto it_end = byte_enable.cbegin() + (size - size_left);
         if (isAnyActiveElement(it_start, it_end)) {
             mem_req = std::make_shared<Request>(frag_addr, frag_size,
-                    flags, masterId, thread->pcState().instAddr(),
+                    flags, requestorId, thread->pcState().instAddr(),
                     tc->contextId());
             mem_req->setByteEnable(std::vector<bool>(it_start, it_end));
         }
     } else {
         mem_req = std::make_shared<Request>(frag_addr, frag_size,
-                    flags, masterId, thread->pcState().instAddr(),
+                    flags, requestorId, thread->pcState().instAddr(),
                     tc->contextId());
     }
 

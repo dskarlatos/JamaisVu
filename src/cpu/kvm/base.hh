@@ -82,7 +82,6 @@ class BaseKvmCPU : public BaseCPU
 
     void init() override;
     void startup() override;
-    void regStats() override;
 
     void serializeThread(CheckpointOut &cp, ThreadID tid) const override;
     void unserializeThread(CheckpointIn &cp, ThreadID tid) override;
@@ -572,15 +571,15 @@ class BaseKvmCPU : public BaseCPU
 
 
     /**
-     * KVM memory port.  Uses default MasterPort behavior and provides an
+     * KVM memory port.  Uses default RequestPort behavior and provides an
      * interface for KVM to transparently submit atomic or timing requests.
      */
-    class KVMCpuPort : public MasterPort
+    class KVMCpuPort : public RequestPort
     {
 
       public:
         KVMCpuPort(const std::string &_name, BaseKvmCPU *_cpu)
-            : MasterPort(_name, _cpu), cpu(_cpu), activeMMIOReqs(0)
+            : RequestPort(_name, _cpu), cpu(_cpu), activeMMIOReqs(0)
         { }
         /**
          * Interface to send Atomic or Timing IO request.  Assumes that the pkt
@@ -782,16 +781,19 @@ class BaseKvmCPU : public BaseCPU
 
   public:
     /* @{ */
-    Stats::Scalar numInsts;
-    Stats::Scalar numVMExits;
-    Stats::Scalar numVMHalfEntries;
-    Stats::Scalar numExitSignal;
-    Stats::Scalar numMMIO;
-    Stats::Scalar numCoalescedMMIO;
-    Stats::Scalar numIO;
-    Stats::Scalar numHalt;
-    Stats::Scalar numInterrupts;
-    Stats::Scalar numHypercalls;
+    struct StatGroup : public Stats::Group {
+        StatGroup(Stats::Group *parent);
+        Stats::Scalar committedInsts;
+        Stats::Scalar numVMExits;
+        Stats::Scalar numVMHalfEntries;
+        Stats::Scalar numExitSignal;
+        Stats::Scalar numMMIO;
+        Stats::Scalar numCoalescedMMIO;
+        Stats::Scalar numIO;
+        Stats::Scalar numHalt;
+        Stats::Scalar numInterrupts;
+        Stats::Scalar numHypercalls;
+    } stats;
     /* @} */
 
     /** Number of instructions executed by the CPU */

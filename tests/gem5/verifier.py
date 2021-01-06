@@ -29,7 +29,7 @@ Built in test cases that verify particular details about a gem5 run.
 '''
 import re
 
-from testlib import test_util as test
+from testlib import test_util
 from testlib.configuration import constants
 from testlib.helper import joinpath, diff_out_file
 
@@ -44,7 +44,7 @@ class Verifier(object):
 
     def instantiate_test(self, name_pfx):
         name = '-'.join([name_pfx, self.__class__.__name__])
-        return test.TestFunction(self._test,
+        return test_util.TestFunction(self._test,
                 name=name, fixtures=self.fixtures)
 
 class MatchGoldStandard(Verifier):
@@ -80,7 +80,7 @@ class MatchGoldStandard(Verifier):
                             ignore_regexes=self.ignore_regex,
                             logger=params.log)
         if diff is not None:
-            test.fail('Stdout did not match:\n%s\nSee %s for full results'
+            test_util.fail('Stdout did not match:\n%s\nSee %s for full results'
                       % (diff, tempdir))
 
     def _generic_instance_warning(self, kwargs):
@@ -115,6 +115,9 @@ class DerivedGoldStandard(MatchGoldStandard):
 class MatchStdout(DerivedGoldStandard):
     _file = constants.gem5_simulation_stdout
     _default_ignore_regex = [
+            re.compile('^\s+$'), # Remove blank lines.
+            re.compile('^gem5 Simulator System'),
+            re.compile('^gem5 is copyrighted software'),
             re.compile('^Redirecting (stdout|stderr) to'),
             re.compile('^gem5 version '),
             re.compile('^gem5 compiled '),
@@ -184,7 +187,7 @@ class MatchRegex(Verifier):
             if parse_file(joinpath(tempdir,
                                    constants.gem5_simulation_stderr)):
                 return # Success
-        test.fail('Could not match regex.')
+        test_util.fail('Could not match regex.')
 
 _re_type = type(re.compile(''))
 def _iterable_regex(regex):

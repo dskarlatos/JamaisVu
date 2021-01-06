@@ -44,6 +44,7 @@
 #include "arch/arm/isa_device.hh"
 #include "arch/arm/miscregs.hh"
 #include "arch/arm/registers.hh"
+#include "arch/arm/self_debug.hh"
 #include "arch/arm/system.hh"
 #include "arch/arm/tlb.hh"
 #include "arch/arm/types.hh"
@@ -56,7 +57,6 @@
 
 struct ArmISAParams;
 struct DummyArmISADeviceParams;
-class ThreadContext;
 class Checkpoint;
 class EventManager;
 
@@ -95,6 +95,8 @@ namespace ArmISA
         bool haveSVE;
         bool haveLSE;
         bool havePAN;
+        bool haveSecEL2;
+        bool haveTME;
 
         /** SVE vector length in quadwords */
         unsigned sveVL;
@@ -106,6 +108,8 @@ namespace ArmISA
         bool impdefAsNop;
 
         bool afterStartup;
+
+        SelfDebug * selfDebug;
 
         /** MiscReg metadata **/
         struct MiscRegLUTEntry {
@@ -446,36 +450,45 @@ namespace ArmISA
             }
         }
 
-        BaseISADevice &getGenericTimer(ThreadContext *tc);
-        BaseISADevice &getGICv3CPUInterface(ThreadContext *tc);
-
+        BaseISADevice &getGenericTimer();
+        BaseISADevice &getGICv3CPUInterface();
 
       private:
-        inline void assert32(ThreadContext *tc) {
-            CPSR cpsr M5_VAR_USED = readMiscReg(MISCREG_CPSR, tc);
-            assert(cpsr.width);
-        }
-
-        inline void assert64(ThreadContext *tc) {
-            CPSR cpsr M5_VAR_USED = readMiscReg(MISCREG_CPSR, tc);
-            assert(!cpsr.width);
-        }
+        void assert32() { assert(((CPSR)readMiscReg(MISCREG_CPSR)).width); }
+        void assert64() { assert(!((CPSR)readMiscReg(MISCREG_CPSR)).width); }
 
       public:
-        void clear(ThreadContext *tc);
+        void clear();
 
       protected:
-        void clear();
         void clear32(const ArmISAParams *p, const SCTLR &sctlr_rst);
         void clear64(const ArmISAParams *p);
         void initID32(const ArmISAParams *p);
         void initID64(const ArmISAParams *p);
 
+        void addressTranslation(TLB::ArmTranslationType tran_type,
+            BaseTLB::Mode mode, Request::Flags flags, RegVal val);
+        void addressTranslation64(TLB::ArmTranslationType tran_type,
+            BaseTLB::Mode mode, Request::Flags flags, RegVal val);
+
       public:
+        SelfDebug*
+        getSelfDebug() const
+        {
+            return selfDebug;
+        }
+
+        static SelfDebug*
+        getSelfDebug(ThreadContext *tc)
+        {
+            auto *arm_isa = static_cast<ArmISA::ISA *>(tc->getIsaPtr());
+            return arm_isa->getSelfDebug();
+        }
+
         RegVal readMiscRegNoEffect(int misc_reg) const;
-        RegVal readMiscReg(int misc_reg, ThreadContext *tc);
+        RegVal readMiscReg(int misc_reg);
         void setMiscRegNoEffect(int misc_reg, RegVal val);
-        void setMiscReg(int misc_reg, RegVal val, ThreadContext *tc);
+        void setMiscReg(int misc_reg, RegVal val);
 
         RegId
         flattenRegId(const RegId& regId) const
@@ -687,6 +700,78 @@ namespace ArmISA
             return flat_idx;
         }
 
+        /**
+         * Returns the enconcing equivalent when VHE is implemented and
+         * HCR_EL2.E2H is enabled and executing at EL2
+         */
+        int
+        redirectRegVHE(ThreadContext * tc, int misc_reg)
+        {
+            const HCR hcr = readMiscRegNoEffect(MISCREG_HCR_EL2);
+            if (hcr.e2h == 0x0 || currEL(tc) != EL2)
+                return misc_reg;
+            SCR scr = readMiscRegNoEffect(MISCREG_SCR_EL3);
+            bool sec_el2 = scr.eel2 && haveSecEL2;
+            switch(misc_reg) {
+              case MISCREG_SPSR_EL1:
+                  return MISCREG_SPSR_EL2;
+              case MISCREG_ELR_EL1:
+                  return MISCREG_ELR_EL2;
+              case MISCREG_SCTLR_EL1:
+                  return MISCREG_SCTLR_EL2;
+              case MISCREG_CPACR_EL1:
+                  return MISCREG_CPTR_EL2;
+        //      case :
+        //          return MISCREG_TRFCR_EL2;
+              case MISCREG_TTBR0_EL1:
+                  return MISCREG_TTBR0_EL2;
+              case MISCREG_TTBR1_EL1:
+                  return MISCREG_TTBR1_EL2;
+              case MISCREG_TCR_EL1:
+                  return MISCREG_TCR_EL2;
+              case MISCREG_AFSR0_EL1:
+                  return MISCREG_AFSR0_EL2;
+              case MISCREG_AFSR1_EL1:
+                  return MISCREG_AFSR1_EL2;
+              case MISCREG_ESR_EL1:
+                  return MISCREG_ESR_EL2;
+              case MISCREG_FAR_EL1:
+                  return MISCREG_FAR_EL2;
+              case MISCREG_MAIR_EL1:
+                  return MISCREG_MAIR_EL2;
+              case MISCREG_AMAIR_EL1:
+                  return MISCREG_AMAIR_EL2;
+              case MISCREG_VBAR_EL1:
+                  return MISCREG_VBAR_EL2;
+              case MISCREG_CONTEXTIDR_EL1:
+                  return MISCREG_CONTEXTIDR_EL2;
+              case MISCREG_CNTKCTL_EL1:
+                  return MISCREG_CNTHCTL_EL2;
+              case MISCREG_CNTP_TVAL_EL0:
+                  return sec_el2? MISCREG_CNTHPS_TVAL_EL2:
+                                 MISCREG_CNTHP_TVAL_EL2;
+              case MISCREG_CNTP_CTL_EL0:
+                  return sec_el2? MISCREG_CNTHPS_CTL_EL2:
+                                 MISCREG_CNTHP_CTL_EL2;
+              case MISCREG_CNTP_CVAL_EL0:
+                  return sec_el2? MISCREG_CNTHPS_CVAL_EL2:
+                                 MISCREG_CNTHP_CVAL_EL2;
+              case MISCREG_CNTV_TVAL_EL0:
+                  return sec_el2? MISCREG_CNTHVS_TVAL_EL2:
+                                 MISCREG_CNTHV_TVAL_EL2;
+              case MISCREG_CNTV_CTL_EL0:
+                  return sec_el2? MISCREG_CNTHVS_CTL_EL2:
+                                 MISCREG_CNTHV_CTL_EL2;
+              case MISCREG_CNTV_CVAL_EL0:
+                  return sec_el2? MISCREG_CNTHVS_CVAL_EL2:
+                                 MISCREG_CNTHV_CVAL_EL2;
+              default:
+                  return misc_reg;
+            }
+            /*should not be accessible */
+            return misc_reg;
+        }
+
         int
         snsBankedIndex64(MiscRegIndex reg, bool ns) const
         {
@@ -718,7 +803,7 @@ namespace ArmISA
             return std::make_pair(lower, upper);
         }
 
-        unsigned getCurSveVecLenInBits(ThreadContext *tc) const;
+        unsigned getCurSveVecLenInBits() const;
 
         unsigned getCurSveVecLenInBitsAtReset() const { return sveVL * 128; }
 
@@ -741,7 +826,9 @@ namespace ArmISA
             updateRegMap(tmp_cpsr);
         }
 
-        void startup(ThreadContext *tc);
+        void startup() override;
+
+        void setupThreadContext();
 
         void takeOverFrom(ThreadContext *new_tc,
                           ThreadContext *old_tc) override;
@@ -763,9 +850,6 @@ namespace ArmISA
         {
             return _vecRegRenameMode;
         }
-
-        /// Explicitly import the otherwise hidden startup
-        using BaseISA::startup;
 
         typedef ArmISAParams Params;
 

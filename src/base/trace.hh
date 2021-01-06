@@ -156,19 +156,29 @@ class Named
     const std::string &name() const { return _name; }
 };
 
-//
-// DPRINTF is a debugging trace facility that allows one to
-// selectively enable tracing statements.  To use DPRINTF, there must
-// be a function or functor called name() that returns a const
-// std::string & in the current scope.
-//
-// If you desire that the automatic printing not occur, use DPRINTFR
-// (R for raw)
-//
+/**
+ * DPRINTF is a debugging trace facility that allows one to
+ * selectively enable tracing statements.  To use DPRINTF, there must
+ * be a function or functor called name() that returns a const
+ * std::string & in the current scope.
+ *
+ * If you desire that the automatic printing not occur, use DPRINTFR
+ * (R for raw)
+ *
+ * \def DDUMP(x, data, count)
+ * \def DPRINTF(x, ...)
+ * \def DPRINTFS(x, s, ...)
+ * \def DPRINTFR(x, ...)
+ * \def DDUMPN(data, count)
+ * \def DPRINTFN(...)
+ * \def DPRINTFNR(...)
+ * \def DPRINTF_UNCONDITIONAL(x, ...)
+ *
+ * @ingroup api_trace
+ * @{
+ */
 
 #if TRACING_ON
-
-#define DTRACE(x) (Debug::x)
 
 #define DDUMP(x, data, count) do {               \
     using namespace Debug;                       \
@@ -220,7 +230,6 @@ class Named
 
 #else // !TRACING_ON
 
-#define DTRACE(x) (false)
 #define DDUMP(x, data, count) do {} while (0)
 #define DPRINTF(x, ...) do {} while (0)
 #define DPRINTFS(x, ...) do {} while (0)
@@ -231,5 +240,7 @@ class Named
 #define DPRINTF_UNCONDITIONAL(x, ...) do {} while (0)
 
 #endif  // TRACING_ON
+
+/** @} */ // end of api_trace
 
 #endif // __BASE_TRACE_HH__

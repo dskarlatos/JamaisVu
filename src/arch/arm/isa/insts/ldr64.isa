@@ -1,6 +1,6 @@
 // -*- mode:c++ -*-
 
-// Copyright (c) 2011-2014, 2017, 2019 ARM Limited
+// Copyright (c) 2011-2014, 2017, 2019-2020 ARM Limited
 // All rights reserved
 //
 // The license below extends only to copyright in the software and shall
@@ -64,7 +64,7 @@ let {{
 
             # Add memory request flags where necessary
             if self.user:
-                self.memFlags.append("ArmISA::TLB::UserMode")
+                self.memFlags.append("userFlag")
 
             if self.flavor == "dprefetch":
                 self.memFlags.append("Request::PREFETCH")
@@ -94,6 +94,8 @@ let {{
                 self.instFlags.extend(["IsMemBarrier",
                                        "IsWriteBarrier",
                                        "IsReadBarrier"])
+                self.memFlags.append("Request::ACQUIRE")
+
             if self.flavor in ("acex", "exclusive", "exp", "acexp"):
                 self.memFlags.append("Request::LLSC")
 
@@ -133,6 +135,11 @@ let {{
                 eaCode += self.offset
             eaCode += ";"
 
+            if self.user:
+                eaCode += " uint8_t userFlag = 0;\n"\
+                          "  if(isUnpriviledgeAccess(xc->tcBase()))\n"\
+                          "     userFlag = ArmISA::TLB::UserMode;"
+
             self.codeBlobs["ea_code"] = eaCode
 
         def emitHelper(self, base='Memory64', wbDecl=None):
@@ -146,11 +153,11 @@ let {{
             fa_code = None
             if not self.micro and self.flavor in ("normal", "widen", "acquire"):
                 fa_code = '''
-                    fault->annotate(ArmFault::SAS, %s);
-                    fault->annotate(ArmFault::SSE, %s);
-                    fault->annotate(ArmFault::SRT, dest);
-                    fault->annotate(ArmFault::SF, %s);
-                    fault->annotate(ArmFault::AR, %s);
+                    fault->annotate(ArmISA::ArmFault::SAS, %s);
+                    fault->annotate(ArmISA::ArmFault::SSE, %s);
+                    fault->annotate(ArmISA::ArmFault::SRT, dest);
+                    fault->annotate(ArmISA::ArmFault::SF, %s);
+                    fault->annotate(ArmISA::ArmFault::AR, %s);
                 ''' % ("0" if self.size == 1 else
                        "1" if self.size == 2 else
                        "2" if self.size == 4 else "3",
@@ -234,7 +241,11 @@ let {{
                 accCode = "WDest = cSwap(Mem%s, isBigEndian64(xc->tcBase()));"
 
             accCode = accCode % buildMemSuffix(self.sign, self.size)
-
+            if self.flavor in ('exclusive', 'acex'):
+                accCode += '''
+                SelfDebug *sd = ArmISA::ISA::getSelfDebug(xc->tcBase());
+                sd->getSstep()->setLdx();
+             '''
             self.codeBlobs["memacc_code"] = accCode
             if accEpilogCode:
                 self.codeBlobs["memacc_epilog_code"] = accEpilogCode
@@ -330,6 +341,11 @@ let {{
                             XDest2 = cSwap(Mem_tud[1],
                                            isBigEndian64(xc->tcBase()));
                         '''
+            if self.flavor in ('exp', 'acexp'):
+                accCode += '''
+                SelfDebug *sd = ArmISA::ISA::getSelfDebug(xc->tcBase());
+                sd->getSstep()->setLdx();
+             '''
             self.codeBlobs["memacc_code"] = accCode
             if accEpilogCode:
                 self.codeBlobs["memacc_epilog_code"] = accEpilogCode

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018 Inria
+ * Copyright (c) 2018-2020 Inria
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,58 +33,101 @@
 #include "mem/cache/compressors/base.hh"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <string>
 
+#include "base/trace.hh"
 #include "debug/CacheComp.hh"
 #include "mem/cache/tags/super_blk.hh"
 #include "params/BaseCacheCompressor.hh"
 
+namespace Compressor {
+
 // Uncomment this line if debugging compression
 //#define DEBUG_COMPRESSION
 
-BaseCacheCompressor::CompressionData::CompressionData()
+Base::CompressionData::CompressionData()
     : _size(0)
 {
 }
 
-BaseCacheCompressor::CompressionData::~CompressionData()
+Base::CompressionData::~CompressionData()
 {
 }
 
 void
-BaseCacheCompressor::CompressionData::setSizeBits(std::size_t size)
+Base::CompressionData::setSizeBits(std::size_t size)
 {
     _size = size;
 }
 
 std::size_t
-BaseCacheCompressor::CompressionData::getSizeBits() const
+Base::CompressionData::getSizeBits() const
 {
     return _size;
 }
 
 std::size_t
-BaseCacheCompressor::CompressionData::getSize() const
+Base::CompressionData::getSize() const
 {
     return std::ceil(_size/8);
 }
 
-BaseCacheCompressor::BaseCacheCompressor(const Params *p)
-  : SimObject(p), blkSize(p->block_size), sizeThreshold(p->size_threshold),
+Base::Base(const Params *p)
+  : SimObject(p), blkSize(p->block_size), chunkSizeBits(p->chunk_size_bits),
+    sizeThreshold((blkSize * p->size_threshold_percentage) / 100),
     stats(*this)
 {
+    fatal_if(64 % chunkSizeBits,
+        "64 must be a multiple of the chunk granularity.");
+
     fatal_if(blkSize < sizeThreshold, "Compressed data must fit in a block");
 }
 
+std::vector<Base::Chunk>
+Base::toChunks(const uint64_t* data) const
+{
+    // Number of chunks in a 64-bit value
+    const unsigned num_chunks_per_64 =
+        (sizeof(uint64_t) * CHAR_BIT) / chunkSizeBits;
+
+    // Turn a 64-bit array into a chunkSizeBits-array
+    std::vector<Chunk> chunks((blkSize * CHAR_BIT) / chunkSizeBits, 0);
+    for (int i = 0; i < chunks.size(); i++) {
+        const int index_64 = std::floor(i / (double)num_chunks_per_64);
+        const unsigned start = i % num_chunks_per_64;
+        chunks[i] = bits(data[index_64],
+            (start + 1) * chunkSizeBits - 1, start * chunkSizeBits);
+    }
+
+    return chunks;
+}
+
 void
-BaseCacheCompressor::compress(const uint64_t* data, Cycles& comp_lat,
-                              Cycles& decomp_lat, std::size_t& comp_size_bits)
+Base::fromChunks(const std::vector<Chunk>& chunks, uint64_t* data) const
+{
+    // Number of chunks in a 64-bit value
+    const unsigned num_chunks_per_64 =
+        (sizeof(uint64_t) * CHAR_BIT) / chunkSizeBits;
+
+    // Turn a chunkSizeBits-array into a 64-bit array
+    std::memset(data, 0, blkSize);
+    for (int i = 0; i < chunks.size(); i++) {
+        const int index_64 = std::floor(i / (double)num_chunks_per_64);
+        const unsigned start = i % num_chunks_per_64;
+        replaceBits(data[index_64], (start + 1) * chunkSizeBits - 1,
+            start * chunkSizeBits, chunks[i]);
+    }
+}
+
+std::unique_ptr<Base::CompressionData>
+Base::compress(const uint64_t* data, Cycles& comp_lat, Cycles& decomp_lat)
 {
     // Apply compression
     std::unique_ptr<CompressionData> comp_data =
-        compress(data, comp_lat, decomp_lat);
+        compress(toChunks(data), comp_lat, decomp_lat);
 
     // If we are in debug mode apply decompression just after the compression.
     // If the results do not match, we've got an error
@@ -101,24 +144,32 @@ BaseCacheCompressor::compress(const uint64_t* data, Cycles& comp_lat,
 
     // Get compression size. If compressed size is greater than the size
     // threshold, the compression is seen as unsuccessful
-    comp_size_bits = comp_data->getSizeBits();
-    if (comp_size_bits >= sizeThreshold * 8) {
-        comp_size_bits = blkSize * 8;
+    std::size_t comp_size_bits = comp_data->getSizeBits();
+    if (comp_size_bits > sizeThreshold * CHAR_BIT) {
+        comp_size_bits = blkSize * CHAR_BIT;
+        comp_data->setSizeBits(comp_size_bits);
+        stats.failedCompressions++;
     }
 
     // Update stats
     stats.compressions++;
     stats.compressionSizeBits += comp_size_bits;
-    stats.compressionSize[std::ceil(std::log2(comp_size_bits))]++;
+    if (comp_size_bits != 0) {
+        stats.compressionSize[1 + std::ceil(std::log2(comp_size_bits))]++;
+    } else {
+        stats.compressionSize[0]++;
+    }
 
     // Print debug information
     DPRINTF(CacheComp, "Compressed cache line from %d to %d bits. " \
             "Compression latency: %llu, decompression latency: %llu\n",
             blkSize*8, comp_size_bits, comp_lat, decomp_lat);
+
+    return comp_data;
 }
 
 Cycles
-BaseCacheCompressor::getDecompressionLatency(const CacheBlk* blk)
+Base::getDecompressionLatency(const CacheBlk* blk)
 {
     const CompressionBlk* comp_blk = static_cast<const CompressionBlk*>(blk);
 
@@ -136,7 +187,7 @@ BaseCacheCompressor::getDecompressionLatency(const CacheBlk* blk)
 }
 
 void
-BaseCacheCompressor::setDecompressionLatency(CacheBlk* blk, const Cycles lat)
+Base::setDecompressionLatency(CacheBlk* blk, const Cycles lat)
 {
     // Sanity check
     assert(blk != nullptr);
@@ -146,7 +197,7 @@ BaseCacheCompressor::setDecompressionLatency(CacheBlk* blk, const Cycles lat)
 }
 
 void
-BaseCacheCompressor::setSizeBits(CacheBlk* blk, const std::size_t size_bits)
+Base::setSizeBits(CacheBlk* blk, const std::size_t size_bits)
 {
     // Sanity check
     assert(blk != nullptr);
@@ -155,11 +206,12 @@ BaseCacheCompressor::setSizeBits(CacheBlk* blk, const std::size_t size_bits)
     static_cast<CompressionBlk*>(blk)->setSizeBits(size_bits);
 }
 
-BaseCacheCompressor::BaseCacheCompressorStats::BaseCacheCompressorStats(
-    BaseCacheCompressor& _compressor)
+Base::BaseStats::BaseStats(Base& _compressor)
   : Stats::Group(&_compressor), compressor(_compressor),
     compressions(this, "compressions",
         "Total number of compressions"),
+    failedCompressions(this, "failed_compressions",
+        "Total number of failed compressions"),
     compressionSize(this, "compression_size",
         "Number of blocks that were compressed to this power of two size"),
     compressionSizeBits(this, "compression_size_bits",
@@ -172,15 +224,19 @@ BaseCacheCompressor::BaseCacheCompressorStats::BaseCacheCompressorStats(
 }
 
 void
-BaseCacheCompressor::BaseCacheCompressorStats::regStats()
+Base::BaseStats::regStats()
 {
     Stats::Group::regStats();
 
-    compressionSize.init(std::log2(compressor.blkSize*8) + 1);
+    // Values comprised are {0, 1, 2, 4, ..., blkSize}
+    compressionSize.init(std::log2(compressor.blkSize*8) + 2);
+    compressionSize.subname(0, "0");
+    compressionSize.subdesc(0,
+        "Number of blocks that compressed to fit in 0 bits");
     for (unsigned i = 0; i <= std::log2(compressor.blkSize*8); ++i) {
         std::string str_i = std::to_string(1 << i);
-        compressionSize.subname(i, str_i);
-        compressionSize.subdesc(i,
+        compressionSize.subname(1+i, str_i);
+        compressionSize.subdesc(1+i,
             "Number of blocks that compressed to fit in " + str_i + " bits");
     }
 
@@ -188,3 +244,4 @@ BaseCacheCompressor::BaseCacheCompressorStats::regStats()
     avgCompressionSizeBits = compressionSizeBits / compressions;
 }
 
+} // namespace Compressor

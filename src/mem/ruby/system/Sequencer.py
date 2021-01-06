@@ -1,4 +1,5 @@
 # Copyright (c) 2009 Advanced Micro Devices, Inc.
+# Copyright (c) 2020 ARM Limited
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -34,12 +35,29 @@ class RubyPort(ClockedObject):
    cxx_header = "mem/ruby/system/RubyPort.hh"
    version = Param.Int(0, "")
 
-   slave = VectorSlavePort("CPU slave port")
-   master = VectorMasterPort("CPU master port")
-   pio_master_port = MasterPort("Ruby mem master port")
-   mem_master_port = MasterPort("Ruby mem master port")
-   pio_slave_port = SlavePort("Ruby pio slave port")
-   mem_slave_port = SlavePort("Ruby memory port")
+   in_ports = VectorResponsePort("CPU side of this RubyPort/Sequencer. "
+               "The CPU request ports should be connected to this. If a CPU "
+               "has multiple ports (e.g., I/D ports) all of the ports for a "
+               "single CPU can connect to one RubyPort.")
+   slave    = DeprecatedParam(in_ports,
+                        '`slave` is now called `in_port`')
+
+   interrupt_out_port = VectorRequestPort("Port to connect to x86 interrupt "
+                        "controller to send the CPU requests from outside.")
+   master             = DeprecatedParam(interrupt_out_port,
+                        '`master` is now called `interrupt_out_port`')
+
+   pio_request_port = RequestPort("Ruby pio request port")
+   pio_master_port  = DeprecatedParam(pio_request_port,
+                        '`pio_master_port` is now called `pio_request_port`')
+
+   mem_request_port = RequestPort("Ruby mem request port")
+   mem_master_port  = DeprecatedParam(mem_request_port,
+                        '`mem_master_port` is now called `mem_request_port`')
+
+   pio_response_port = ResponsePort("Ruby pio response port")
+   pio_slave_port    = DeprecatedParam(pio_response_port,
+                        '`pio_slave_port` is now called `pio_response_port`')
 
    using_ruby_tester = Param.Bool(False, "")
    no_retry_on_stall = Param.Bool(False, "")
@@ -69,6 +87,11 @@ class RubySequencer(RubyPort):
    # id used by protocols that support multiple sequencers per controller
    # 99 is the dummy default value
    coreid = Param.Int(99, "CorePair core id")
+
+class RubyHTMSequencer(RubySequencer):
+   type = 'RubyHTMSequencer'
+   cxx_class = 'HTMSequencer'
+   cxx_header = "mem/ruby/system/HTMSequencer.hh"
 
 class DMASequencer(RubyPort):
    type = 'DMASequencer'

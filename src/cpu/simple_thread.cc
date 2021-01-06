@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018 ARM Limited
+ * Copyright (c) 2018, 2020 ARM Limited
  * All rights reserved
  *
  * The license below extends only to copyright in the software and shall
@@ -42,18 +42,15 @@
 
 #include <string>
 
-#include "arch/isa_traits.hh"
-#include "arch/kernel_stats.hh"
-#include "arch/stacktrace.hh"
 #include "arch/utility.hh"
 #include "base/callback.hh"
+#include "base/compiler.hh"
 #include "base/cprintf.hh"
 #include "base/output.hh"
 #include "base/trace.hh"
 #include "config/the_isa.hh"
 #include "cpu/base.hh"
-#include "cpu/profile.hh"
-#include "cpu/quiesce_event.hh"
+#include "cpu/simple/base.hh"
 #include "cpu/thread_context.hh"
 #include "mem/se_translating_port_proxy.hh"
 #include "mem/translating_port_proxy.hh"
@@ -75,44 +72,25 @@ SimpleThread::SimpleThread(BaseCPU *_cpu, int _thread_num, System *_sys,
       isa(dynamic_cast<TheISA::ISA *>(_isa)),
       predicate(true), memAccPredicate(true),
       comInstEventQueue("instruction-based event queue"),
-      system(_sys), itb(_itb), dtb(_dtb), decoder(TheISA::Decoder(isa))
+      system(_sys), itb(_itb), dtb(_dtb), decoder(isa),
+      htmTransactionStarts(0), htmTransactionStops(0)
 {
     assert(isa);
     clearArchRegs();
-    quiesceEvent = new EndQuiesceEvent(this);
 }
 
 SimpleThread::SimpleThread(BaseCPU *_cpu, int _thread_num, System *_sys,
-                           BaseTLB *_itb, BaseTLB *_dtb,
-                           BaseISA *_isa, bool use_kernel_stats)
+                           BaseTLB *_itb, BaseTLB *_dtb, BaseISA *_isa)
     : ThreadState(_cpu, _thread_num, NULL),
       isa(dynamic_cast<TheISA::ISA *>(_isa)),
       predicate(true), memAccPredicate(true),
       comInstEventQueue("instruction-based event queue"),
-      system(_sys), itb(_itb), dtb(_dtb), decoder(TheISA::Decoder(isa))
+      system(_sys), itb(_itb), dtb(_dtb), decoder(isa),
+      htmTransactionStarts(0), htmTransactionStops(0)
 {
     assert(isa);
 
-    quiesceEvent = new EndQuiesceEvent(this);
-
     clearArchRegs();
-
-    if (baseCpu->params()->profile) {
-        profile = new FunctionProfile(system->workload->symtab(this));
-        Callback *cb =
-            new MakeCallback<SimpleThread,
-            &SimpleThread::dumpFuncProfile>(this);
-        registerExitCallback(cb);
-    }
-
-    // let's fill with a dummy node for now so we don't get a segfault
-    // on the first cycle when there's no node available.
-    static ProfileNode dummyNode;
-    profileNode = &dummyNode;
-    profilePC = 3;
-
-    if (use_kernel_stats)
-        kernelStats = new TheISA::Kernel::Statistics();
 }
 
 void
@@ -123,7 +101,6 @@ SimpleThread::takeOverFrom(ThreadContext *oldContext)
 
     isa->takeOverFrom(this, oldContext);
 
-    kernelStats = oldContext->getKernelStats();
     funcExeInst = oldContext->readFuncExeInst();
     storeCondFailures = 0;
 }
@@ -154,20 +131,6 @@ SimpleThread::unserialize(CheckpointIn &cp)
 {
     ThreadState::unserialize(cp);
     ::unserialize(*this, cp);
-}
-
-void
-SimpleThread::startup()
-{
-    isa->startup(this);
-}
-
-void
-SimpleThread::dumpFuncProfile()
-{
-    OutputStream *os(simout.create(csprintf("profile.%s.dat", baseCpu->name())));
-    profile->dump(this, *os->stream());
-    simout.close(os);
 }
 
 void
@@ -204,16 +167,34 @@ SimpleThread::halt()
     baseCpu->haltContext(_threadId);
 }
 
-
-void
-SimpleThread::regStats(const string &name)
-{
-    if (FullSystem && kernelStats)
-        kernelStats->regStats(name + ".kern");
-}
-
 void
 SimpleThread::copyArchRegs(ThreadContext *src_tc)
 {
     TheISA::copyRegs(src_tc, this);
+}
+
+// hardware transactional memory
+void
+SimpleThread::htmAbortTransaction(uint64_t htm_uid, HtmFailureFaultCause cause)
+{
+    BaseSimpleCPU *baseSimpleCpu = dynamic_cast<BaseSimpleCPU*>(baseCpu);
+    assert(baseSimpleCpu);
+
+    baseSimpleCpu->htmSendAbortSignal(cause);
+
+    // these must be reset after the abort signal has been sent
+    htmTransactionStarts = 0;
+    htmTransactionStops = 0;
+}
+
+BaseHTMCheckpointPtr&
+SimpleThread::getHtmCheckpointPtr()
+{
+    return _htmCheckpoint;
+}
+
+void
+SimpleThread::setHtmCheckpointPtr(BaseHTMCheckpointPtr new_cpt)
+{
+    _htmCheckpoint = std::move(new_cpt);
 }

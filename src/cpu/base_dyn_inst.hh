@@ -61,6 +61,7 @@
 #include "cpu/op_class.hh"
 #include "cpu/static_inst.hh"
 #include "cpu/translation.hh"
+#include "debug/HtmCpu.hh"
 #include "mem/packet.hh"
 #include "mem/request.hh"
 #include "sim/byteswap.hh"
@@ -157,6 +158,7 @@ protected:
         IsStrictlyOrdered,
         ReqMade,
         MemOpDone,
+        HtmFromTransaction,
         MaxFlags
     };
 
@@ -265,7 +267,12 @@ public:
     // Need a copy of main request pointer to verify on writes.
     RequestPtr reqToVerify;
 
-protected:
+  private:
+    // hardware transactional memory
+    uint64_t htmUid;
+    uint64_t htmDepth;
+
+  protected:
     /** Flattened register index of the destination registers of this
      *  instruction.
      */
@@ -323,28 +330,34 @@ public:
     //
     ////////////////////////////////////////////
 
-    void demapPage(Addr vaddr, uint64_t asn)
+    void
+    demapPage(Addr vaddr, uint64_t asn) override
     {
         cpu->demapPage(vaddr, asn);
     }
-    void demapInstPage(Addr vaddr, uint64_t asn)
+    void
+    demapInstPage(Addr vaddr, uint64_t asn)
     {
         cpu->demapPage(vaddr, asn);
     }
-    void demapDataPage(Addr vaddr, uint64_t asn)
+    void
+    demapDataPage(Addr vaddr, uint64_t asn)
     {
         cpu->demapPage(vaddr, asn);
     }
 
     Fault initiateMemRead(Addr addr, unsigned size, Request::Flags flags,
-        const std::vector<bool>& byte_enable = std::vector<bool>());
+            const std::vector<bool> &byte_enable=std::vector<bool>()) override;
+
+    Fault initiateHtmCmd(Request::Flags flags) override;
 
     Fault writeMem(uint8_t *data, unsigned size, Addr addr,
-        Request::Flags flags, uint64_t *res,
-        const std::vector<bool>& byte_enable = std::vector<bool>());
+                   Request::Flags flags, uint64_t *res,
+                   const std::vector<bool> &byte_enable=std::vector<bool>())
+                   override;
 
     Fault initiateMemAMO(Addr addr, unsigned size, Request::Flags flags,
-        AtomicOpFunctorPtr amo_op);
+                         AtomicOpFunctorPtr amo_op) override;
 
     /** True if the DTB address translation has started. */
     bool translationStarted() const {
@@ -367,10 +380,14 @@ public:
      * snoop invalidate modifies the line, in which case we need to squash.
      * If nothing modified the line the order doesn't matter.
      */
-    bool possibleLoadViolation() const {
+    bool
+    possibleLoadViolation() const
+    {
         return instFlags[PossibleLoadViolation];
     }
-    void possibleLoadViolation(bool f) {
+    void
+    possibleLoadViolation(bool f)
+    {
         instFlags[PossibleLoadViolation] = f;
     }
 
@@ -389,7 +406,8 @@ public:
      * Returns true if the DTB address translation is being delayed due to a hw
      * page table walk.
      */
-    bool isTranslationDelayed() const
+    bool
+    isTranslationDelayed() const
     {
         return (translationStarted() && !translationCompleted());
     }
@@ -402,13 +420,15 @@ public:
     /** Returns the physical register index of the i'th destination
      *  register.
      */
-    PhysRegIdPtr renamedDestRegIdx(int idx) const
+    PhysRegIdPtr
+    renamedDestRegIdx(int idx) const
     {
         return _destRegIdx[idx];
     }
 
     /** Returns the physical register index of the i'th source register. */
-    PhysRegIdPtr renamedSrcRegIdx(int idx) const
+    PhysRegIdPtr
+    renamedSrcRegIdx(int idx) const
     {
         assert(TheISA::MaxInstSrcRegs > idx);
         return _srcRegIdx[idx];
@@ -417,7 +437,8 @@ public:
     /** Returns the flattened register index of the i'th destination
      *  register.
      */
-    const RegId& flattenedDestRegIdx(int idx) const
+    const RegId &
+    flattenedDestRegIdx(int idx) const
     {
         return _flatDestRegIdx[idx];
     }
@@ -425,7 +446,8 @@ public:
     /** Returns the physical register index of the previous physical register
      *  that remapped to the same logical register index.
      */
-    PhysRegIdPtr prevDestRegIdx(int idx) const
+    PhysRegIdPtr
+    prevDestRegIdx(int idx) const
     {
         return _prevDestRegIdx[idx];
     }
@@ -433,9 +455,9 @@ public:
     /** Renames a destination register to a physical register.  Also records
      *  the previous physical register that the logical register mapped to.
      */
-    void renameDestReg(int idx,
-        PhysRegIdPtr renamed_dest,
-        PhysRegIdPtr previous_rename)
+    void
+    renameDestReg(int idx, PhysRegIdPtr renamed_dest,
+                  PhysRegIdPtr previous_rename)
     {
         _destRegIdx[idx] = renamed_dest;
         _prevDestRegIdx[idx] = previous_rename;
@@ -447,7 +469,8 @@ public:
      *  has/will produce that logical register's result.
      *  @todo: add in whether or not the source register is ready.
      */
-    void renameSrcReg(int idx, PhysRegIdPtr renamed_src)
+    void
+    renameSrcReg(int idx, PhysRegIdPtr renamed_src)
     {
         _srcRegIdx[idx] = renamed_src;
     }
@@ -455,7 +478,8 @@ public:
     /** Flattens a destination architectural register index into a logical
      * index.
      */
-    void flattenDestReg(int idx, const RegId& flattened_dest)
+    void
+    flattenDestReg(int idx, const RegId &flattened_dest)
     {
         _flatDestRegIdx[idx] = flattened_dest;
     }
@@ -500,9 +524,7 @@ public:
     }
 
     /** Read this CPU's data requestor ID */
-    MasterID masterId() const {
-        return cpu->dataMasterId();
-    }
+    RequestorID requestorId() const { return cpu->dataRequestorId(); }
 
     /** Read this context's system-wide ID **/
     ContextID contextId() const {
@@ -529,10 +551,7 @@ public:
     }
 
     /** Set the predicted target of this current instruction. */
-    void setPredTarg(const TheISA::PCState &_predPC)
-    {
-        predPC = _predPC;
-    }
+    void setPredTarg(const TheISA::PCState &_predPC) { predPC = _predPC; }
 
     const TheISA::PCState &readPredTarg() {
         return predPC;
@@ -554,18 +573,17 @@ public:
     }
 
     /** Returns whether the instruction was predicted taken or not. */
-    bool readPredTaken()
-    {
-        return instFlags[PredTaken];
-    }
+    bool readPredTaken() { return instFlags[PredTaken]; }
 
-    void setPredTaken(bool predicted_taken)
+    void
+    setPredTaken(bool predicted_taken)
     {
         instFlags[PredTaken] = predicted_taken;
     }
 
     /** Returns whether the instruction mispredicted. */
-    bool mispredicted()
+    bool
+    mispredicted()
     {
         TheISA::PCState tempPC = pc;
         TheISA::advancePC(tempPC, staticInst);
@@ -591,106 +609,102 @@ public:
         return staticInst->isAtomic();
     }
     bool isStoreConditional() const
-    {
-        return staticInst->isStoreConditional();
-    }
-    bool isInstPrefetch() const {
-        return staticInst->isInstPrefetch();
-    }
-    bool isDataPrefetch() const {
-        return staticInst->isDataPrefetch();
-    }
-    bool isInteger()      const {
-        return staticInst->isInteger();
-    }
-    bool isFloating()     const {
-        return staticInst->isFloating();
-    }
-    bool isVector()       const {
-        return staticInst->isVector();
-    }
-    bool isControl()      const {
-        return staticInst->isControl();
-    }
-    bool isCall()         const {
-        return staticInst->isCall();
-    }
-    bool isReturn()       const {
-        return staticInst->isReturn();
-    }
-    bool isDirectCtrl()   const {
-        return staticInst->isDirectCtrl();
-    }
-    bool isIndirectCtrl() const {
-        return staticInst->isIndirectCtrl();
-    }
-    bool isCondCtrl()     const {
-        return staticInst->isCondCtrl();
-    }
-    bool isUncondCtrl()   const {
-        return staticInst->isUncondCtrl();
-    }
-    bool isCondDelaySlot() const {
-        return staticInst->isCondDelaySlot();
-    }
-    bool isThreadSync()   const {
-        return staticInst->isThreadSync();
-    }
-    bool isSerializing()  const {
-        return staticInst->isSerializing();
-    }
-    bool isSerializeBefore() const
+    { return staticInst->isStoreConditional(); }
+    bool isInstPrefetch() const { return staticInst->isInstPrefetch(); }
+    bool isDataPrefetch() const { return staticInst->isDataPrefetch(); }
+    bool isInteger()      const { return staticInst->isInteger(); }
+    bool isFloating()     const { return staticInst->isFloating(); }
+    bool isVector()       const { return staticInst->isVector(); }
+    bool isControl()      const { return staticInst->isControl(); }
+    bool isCall()         const { return staticInst->isCall(); }
+    bool isReturn()       const { return staticInst->isReturn(); }
+    bool isDirectCtrl()   const { return staticInst->isDirectCtrl(); }
+    bool isIndirectCtrl() const { return staticInst->isIndirectCtrl(); }
+    bool isCondCtrl()     const { return staticInst->isCondCtrl(); }
+    bool isUncondCtrl()   const { return staticInst->isUncondCtrl(); }
+    bool isCondDelaySlot() const { return staticInst->isCondDelaySlot(); }
+    bool isThreadSync()   const { return staticInst->isThreadSync(); }
+    bool isSerializing()  const { return staticInst->isSerializing(); }
+    bool
+    isSerializeBefore() const
     {
         return staticInst->isSerializeBefore() || status[SerializeBefore];
     }
-    bool isSerializeAfter() const
+    bool
+    isSerializeAfter() const
     {
         return staticInst->isSerializeAfter() || status[SerializeAfter];
     }
-    bool isSquashAfter() const {
-        return staticInst->isSquashAfter();
+    bool isSquashAfter() const { return staticInst->isSquashAfter(); }
+    bool isMemBarrier()   const { return staticInst->isMemBarrier(); }
+    bool isWriteBarrier() const { return staticInst->isWriteBarrier(); }
+    bool isNonSpeculative() const { return staticInst->isNonSpeculative(); }
+    bool isQuiesce() const { return staticInst->isQuiesce(); }
+    bool isIprAccess() const { return staticInst->isIprAccess(); }
+    bool isUnverifiable() const { return staticInst->isUnverifiable(); }
+    bool isSyscall() const { return staticInst->isSyscall(); }
+    bool isMacroop() const { return staticInst->isMacroop(); }
+    bool isMicroop() const { return staticInst->isMicroop(); }
+    bool isDelayedCommit() const { return staticInst->isDelayedCommit(); }
+    bool isLastMicroop() const { return staticInst->isLastMicroop(); }
+    bool isFirstMicroop() const { return staticInst->isFirstMicroop(); }
+    bool isMicroBranch() const { return staticInst->isMicroBranch(); }
+    // hardware transactional memory
+    bool isHtmStart() const { return staticInst->isHtmStart(); }
+    bool isHtmStop() const { return staticInst->isHtmStop(); }
+    bool isHtmCancel() const { return staticInst->isHtmCancel(); }
+    bool isHtmCmd() const { return staticInst->isHtmCmd(); }
+    bool isDiv() const { return opClass() == IntDivOp || opClass() == FloatDivOp; }
+
+    uint64_t
+    getHtmTransactionUid() const override
+    {
+        assert(instFlags[HtmFromTransaction]);
+        return this->htmUid;
     }
-    bool isMemBarrier()   const {
-        return staticInst->isMemBarrier();
+
+    uint64_t
+    newHtmTransactionUid() const override
+    {
+        panic("Not yet implemented\n");
+        return 0;
     }
-    bool isWriteBarrier() const {
-        return staticInst->isWriteBarrier();
+
+    bool
+    inHtmTransactionalState() const override
+    {
+        return instFlags[HtmFromTransaction];
     }
-    bool isNonSpeculative() const {
-        return staticInst->isNonSpeculative();
+
+    uint64_t
+    getHtmTransactionalDepth() const override
+    {
+        if (inHtmTransactionalState())
+            return this->htmDepth;
+        else
+            return 0;
     }
-    bool isQuiesce() const {
-        return staticInst->isQuiesce();
+
+    void
+    setHtmTransactionalState(uint64_t htm_uid, uint64_t htm_depth)
+    {
+        instFlags.set(HtmFromTransaction);
+        htmUid = htm_uid;
+        htmDepth = htm_depth;
     }
-    bool isIprAccess() const {
-        return staticInst->isIprAccess();
-    }
-    bool isUnverifiable() const {
-        return staticInst->isUnverifiable();
-    }
-    bool isSyscall() const {
-        return staticInst->isSyscall();
-    }
-    bool isMacroop() const {
-        return staticInst->isMacroop();
-    }
-    bool isMicroop() const {
-        return staticInst->isMicroop();
-    }
-    bool isDelayedCommit() const {
-        return staticInst->isDelayedCommit();
-    }
-    bool isLastMicroop() const {
-        return staticInst->isLastMicroop();
-    }
-    bool isFirstMicroop() const {
-        return staticInst->isFirstMicroop();
-    }
-    bool isMicroBranch() const {
-        return staticInst->isMicroBranch();
-    }
-    bool isDiv() const {
-        return opClass() == IntDivOp || opClass() == FloatDivOp;
+
+    void
+    clearHtmTransactionalState()
+    {
+        if (inHtmTransactionalState()) {
+            DPRINTF(HtmCpu,
+                "clearing instuction's transactional state htmUid=%u\n",
+                getHtmTransactionUid());
+
+            instFlags.reset(HtmFromTransaction);
+            htmUid = -1;
+            htmDepth = 0;
+        }
     }
 
     /** Temporarily sets this instruction as a serialize before instruction. */
@@ -780,19 +794,12 @@ public:
 
     // the following are used to track physical register usage
     // for machines with separate int & FP reg files
-    int8_t numFPDestRegs()  const {
-        return staticInst->numFPDestRegs();
-    }
-    int8_t numIntDestRegs() const {
-        return staticInst->numIntDestRegs();
-    }
-    int8_t numCCDestRegs() const {
-        return staticInst->numCCDestRegs();
-    }
-    int8_t numVecDestRegs() const {
-        return staticInst->numVecDestRegs();
-    }
-    int8_t numVecElemDestRegs() const
+    int8_t numFPDestRegs()  const { return staticInst->numFPDestRegs(); }
+    int8_t numIntDestRegs() const { return staticInst->numIntDestRegs(); }
+    int8_t numCCDestRegs() const { return staticInst->numCCDestRegs(); }
+    int8_t numVecDestRegs() const { return staticInst->numVecDestRegs(); }
+    int8_t
+    numVecElemDestRegs() const
     {
         return staticInst->numVecElemDestRegs();
     }
@@ -820,7 +827,8 @@ public:
     /** Pops a result off the instResult queue.
      * If the result stack is empty, return the default value.
      * */
-    InstResult popResult(InstResult dflt = InstResult())
+    InstResult
+    popResult(InstResult dflt=InstResult())
     {
         if (!instResult.empty()) {
             InstResult t = instResult.front();
@@ -834,7 +842,8 @@ public:
     /** @{ */
     /** Scalar result. */
     template<typename T>
-    void setScalarResult(T&& t)
+    void
+    setScalarResult(T &&t)
     {
         if (instFlags[RecordResult]) {
             instResult.push(InstResult(std::forward<T>(t),
@@ -844,7 +853,8 @@ public:
 
     /** Full vector result. */
     template<typename T>
-    void setVecResult(T&& t)
+    void
+    setVecResult(T &&t)
     {
         if (instFlags[RecordResult]) {
             instResult.push(InstResult(std::forward<T>(t),
@@ -854,7 +864,8 @@ public:
 
     /** Vector element result. */
     template<typename T>
-    void setVecElemResult(T&& t)
+    void
+    setVecElemResult(T &&t)
     {
         if (instFlags[RecordResult]) {
             instResult.push(InstResult(std::forward<T>(t),
@@ -864,7 +875,8 @@ public:
 
     /** Predicate result. */
     template<typename T>
-    void setVecPredResult(T&& t)
+    void
+    setVecPredResult(T &&t)
     {
         if (instFlags[RecordResult]) {
             instResult.push(InstResult(std::forward<T>(t),
@@ -874,40 +886,45 @@ public:
     /** @} */
 
     /** Records an integer register being set to a value. */
-    void setIntRegOperand(const StaticInst *si, int idx, RegVal val)
+    void
+    setIntRegOperand(const StaticInst *si, int idx, RegVal val) override
     {
         setScalarResult(val);
     }
 
     /** Records a CC register being set to a value. */
-    void setCCRegOperand(const StaticInst *si, int idx, RegVal val)
+    void
+    setCCRegOperand(const StaticInst *si, int idx, RegVal val) override
     {
         setScalarResult(val);
     }
 
     /** Record a vector register being set to a value */
-    void setVecRegOperand(const StaticInst *si, int idx,
-        const VecRegContainer& val)
+    void
+    setVecRegOperand(const StaticInst *si, int idx,
+                     const VecRegContainer &val) override
     {
         setVecResult(val);
     }
 
     /** Records an fp register being set to an integer value. */
     void
-        setFloatRegOperandBits(const StaticInst *si, int idx, RegVal val)
+    setFloatRegOperandBits(const StaticInst *si, int idx, RegVal val) override
     {
         setScalarResult(val);
     }
-
-    /** Record a vector register being set to a value */
-    void setVecElemOperand(const StaticInst *si, int idx, const VecElem val)
+    
+    void
+    setVecElemOperand(const StaticInst *si, int idx,
+                      const VecElem val) override
     {
         setVecElemResult(val);
     }
 
     /** Record a vector register being set to a value */
-    void setVecPredRegOperand(const StaticInst *si, int idx,
-        const VecPredRegContainer& val)
+    void
+    setVecPredRegOperand(const StaticInst *si, int idx,
+                         const VecPredRegContainer &val) override
     {
         setVecPredResult(val);
     }
@@ -919,7 +936,8 @@ public:
     void markSrcRegReady(RegIndex src_idx);
 
     /** Returns if a source register is ready. */
-    bool isReadySrcRegIdx(int idx) const
+    bool
+    isReadySrcRegIdx(int idx) const
     {
         return this->_readySrcRegIdx[idx];
     }
@@ -1217,14 +1235,10 @@ public:
     }
 
     /** Read the PC state of this instruction. */
-    TheISA::PCState pcState() const {
-        return pc;
-    }
+    TheISA::PCState pcState() const override { return pc; }
 
     /** Set the PC state of this instruction. */
-    void pcState(const TheISA::PCState &val) {
-        pc = val;
-    }
+    void pcState(const TheISA::PCState &val) override { pc = val; }
 
     /** Read the PC of this instruction. */
     Addr instAddr() const {
@@ -1241,12 +1255,10 @@ public:
         return pc.microPC();
     }
 
-    bool readPredicate() const
-    {
-        return instFlags[Predicate];
-    }
+    bool readPredicate() const override { return instFlags[Predicate]; }
 
-    void setPredicate(bool val)
+    void
+    setPredicate(bool val) override
     {
         instFlags[Predicate] = val;
 
@@ -1256,13 +1268,13 @@ public:
     }
 
     bool
-        readMemAccPredicate() const
+    readMemAccPredicate() const override
     {
         return instFlags[MemAccPredicate];
     }
 
     void
-        setMemAccPredicate(bool val)
+    setMemAccPredicate(bool val) override
     {
         instFlags[MemAccPredicate] = val;
     }
@@ -1278,9 +1290,7 @@ public:
     }
 
     /** Returns the thread context. */
-    ThreadContext *tcBase() const {
-        return thread->getTC();
-    }
+    ThreadContext *tcBase() const override { return thread->getTC(); }
 
 public:
     /** Returns whether or not the eff. addr. source registers are ready. */
@@ -1315,30 +1325,38 @@ public:
 
 public:
     /** Returns the number of consecutive store conditional failures. */
-    unsigned int readStCondFailures() const
+    unsigned int
+    readStCondFailures() const override
     {
         return thread->storeCondFailures;
     }
 
     /** Sets the number of consecutive store conditional failures. */
-    void setStCondFailures(unsigned int sc_failures)
+    void
+    setStCondFailures(unsigned int sc_failures) override
     {
         thread->storeCondFailures = sc_failures;
     }
 
 public:
     // monitor/mwait funtions
-    void armMonitor(Addr address) {
+    void
+    armMonitor(Addr address) override
+    {
         cpu->armMonitor(threadNumber, address);
     }
-    bool mwait(PacketPtr pkt) {
+    bool
+    mwait(PacketPtr pkt) override
+    {
         return cpu->mwait(threadNumber, pkt);
     }
-    void mwaitAtomic(ThreadContext *tc)
+    void
+    mwaitAtomic(ThreadContext *tc) override
     {
         return cpu->mwaitAtomic(threadNumber, tc, cpu->dtb);
     }
-    AddressMonitor *getAddrMonitor()
+    AddressMonitor *
+    getAddrMonitor() override
     {
         return cpu->getCpuAddrMonitor(threadNumber);
     }
@@ -1352,8 +1370,8 @@ public:
 template<class Impl>
 Fault
 BaseDynInst<Impl>::initiateMemRead(Addr addr, unsigned size,
-    Request::Flags flags,
-    const std::vector<bool>& byte_enable)
+                                   Request::Flags flags,
+                                   const std::vector<bool> &byte_enable)
 {
     assert(byte_enable.empty() || byte_enable.size() == size);
     return cpu->pushRequest(
@@ -1364,9 +1382,18 @@ BaseDynInst<Impl>::initiateMemRead(Addr addr, unsigned size,
 
 template<class Impl>
 Fault
+BaseDynInst<Impl>::initiateHtmCmd(Request::Flags flags)
+{
+    return cpu->pushRequest(
+            dynamic_cast<typename DynInstPtr::PtrType>(this),
+            /* ld */ true, nullptr, 8, 0x0ul, flags, nullptr, nullptr);
+}
+
+template<class Impl>
+Fault
 BaseDynInst<Impl>::writeMem(uint8_t *data, unsigned size, Addr addr,
-    Request::Flags flags, uint64_t *res,
-    const std::vector<bool>& byte_enable)
+                            Request::Flags flags, uint64_t *res,
+                            const std::vector<bool> &byte_enable)
 {
     assert(byte_enable.empty() || byte_enable.size() == size);
     return cpu->pushRequest(

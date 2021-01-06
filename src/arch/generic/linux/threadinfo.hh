@@ -31,7 +31,6 @@
 
 #include "cpu/thread_context.hh"
 #include "sim/system.hh"
-#include "sim/vptr.hh"
 
 namespace Linux {
 
@@ -40,53 +39,44 @@ class ThreadInfo
   private:
     ThreadContext *tc;
     System *sys;
-    Addr pcbb;
+
+    ByteOrder byteOrder;
 
     template <typename T>
     bool
     get_data(const char *symbol, T &data)
     {
-        Addr addr = 0;
-        if (!sys->workload->symtab(tc)->findAddress(symbol, addr)) {
+        auto &symtab = sys->workload->symtab(tc);
+        auto it = symtab.find(symbol);
+        if (it == symtab.end()) {
             warn_once("Unable to find kernel symbol %s\n", symbol);
             warn_once("Kernel not compiled with task_struct info; can't get "
                       "currently executing task/process/thread name/ids!\n");
             return false;
         }
 
-        data = tc->getVirtProxy().read<T>(addr, TheISA::GuestByteOrder);
+        data = tc->getVirtProxy().read<T>(it->address, byteOrder);
 
         return true;
     }
 
   public:
-    ThreadInfo(ThreadContext *_tc, Addr _pcbb = 0)
-        : tc(_tc), sys(tc->getSystemPtr()), pcbb(_pcbb)
+    ThreadInfo(ThreadContext *_tc)
+        : tc(_tc), sys(tc->getSystemPtr()),
+        byteOrder(tc->getSystemPtr()->getGuestByteOrder())
     {
 
     }
     ~ThreadInfo()
     {}
 
-    inline Addr
+    virtual Addr
     curThreadInfo()
     {
-        if (!TheISA::CurThreadInfoImplemented)
-            panic("curThreadInfo() not implemented for this ISA");
-
-        Addr addr = pcbb;
-        Addr sp;
-
-        if (!addr)
-            addr = tc->readMiscRegNoEffect(TheISA::CurThreadInfoReg);
-
-        PortProxy &p = tc->getPhysProxy();
-        p.readBlob(addr, &sp, sizeof(Addr));
-
-        return sp & ~ULL(0x3fff);
+        panic("curThreadInfo() not implemented.");
     }
 
-    inline Addr
+    Addr
     curTaskInfo(Addr thread_info = 0)
     {
         // Note that in Linux 4.10 the thread_info struct will no longer have a
@@ -103,7 +93,8 @@ class ThreadInfo
     }
 
     int32_t
-    curTaskPIDFromTaskStruct(Addr task_struct) {
+    curTaskPIDFromTaskStruct(Addr task_struct)
+    {
         int32_t offset = 0;
         if (!get_data("task_struct_pid", offset))
             return -1;

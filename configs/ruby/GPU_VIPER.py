@@ -37,6 +37,7 @@ from m5.defines import buildEnv
 from m5.util import addToPath
 from .Ruby import create_topology
 from .Ruby import send_evicts
+from common import FileSystemConfig
 
 addToPath('../')
 
@@ -322,24 +323,14 @@ class L3Cntrl(L3Cache_Controller, CntrlBase):
         self.probeToL3 = probe_to_l3
         self.respToL3 = resp_to_l3
 
-class DirMem(RubyDirectoryMemory, CntrlBase):
-    def create(self, options, ruby_system, system):
-        self.version = self.versionCount()
-
-        phys_mem_size = AddrRange(options.mem_size).size()
-        mem_module_size = phys_mem_size / options.num_dirs
-        dir_size = MemorySize('0B')
-        dir_size.value = mem_module_size
-        self.size = dir_size
-
 class DirCntrl(Directory_Controller, CntrlBase):
-    def create(self, options, ruby_system, system):
+    def create(self, options, dir_ranges, ruby_system, system):
         self.version = self.versionCount()
 
         self.response_latency = 30
 
-        self.directory = DirMem()
-        self.directory.create(options, ruby_system, system)
+        self.addr_ranges = dir_ranges
+        self.directory = RubyDirectoryMemory()
 
         self.L3CacheMemory = L3Cache()
         self.L3CacheMemory.create(options, ruby_system, system)
@@ -408,6 +399,9 @@ def define_options(parser):
 
     parser.add_option("--noL1", action = "store_true", default = False,
                       help = "bypassL1")
+    parser.add_option("--scalar-buffer-size", type = 'int', default = 128,
+                      help="Size of the mandatory queue in the GPU scalar "
+                      "cache controller")
 
 def create_system(options, full_system, system, dma_devices, bootmem,
                   ruby_system):
@@ -441,6 +435,17 @@ def create_system(options, full_system, system, dma_devices, bootmem,
     # Clusters
     crossbar_bw = None
     mainCluster = None
+
+    if options.numa_high_bit:
+        numa_bit = options.numa_high_bit
+    else:
+        # if the numa_bit is not specified, set the directory bits as the
+        # lowest bits above the block offset bits, and the numa_bit as the
+        # highest of those directory bits
+        dir_bits = int(math.log(options.num_dirs, 2))
+        block_size_bits = int(math.log(options.cacheline_size, 2))
+        numa_bit = block_size_bits + dir_bits - 1
+
     if hasattr(options, 'bw_scalor') and options.bw_scalor > 0:
         #Assuming a 2GHz clock
         crossbar_bw = 16 * options.num_compute_units * options.bw_scalor
@@ -448,9 +453,16 @@ def create_system(options, full_system, system, dma_devices, bootmem,
     else:
         mainCluster = Cluster(intBW=8) # 16 GB/s
     for i in range(options.num_dirs):
+        dir_ranges = []
+        for r in system.mem_ranges:
+            addr_range = m5.objects.AddrRange(r.start, size = r.size(),
+                                              intlvHighBit = numa_bit,
+                                              intlvBits = dir_bits,
+                                              intlvMatch = i)
+            dir_ranges.append(addr_range)
 
         dir_cntrl = DirCntrl(noTCCdir = True, TCC_select_num_bits = TCC_bits)
-        dir_cntrl.create(options, ruby_system, system)
+        dir_cntrl.create(options, dir_ranges, ruby_system, system)
         dir_cntrl.number_of_TBEs = options.num_tbes
         dir_cntrl.useL3OnWT = options.use_L3_on_WT
         # the number_of_TBEs is inclusive of TBEs below
@@ -473,6 +485,15 @@ def create_system(options, full_system, system, dma_devices, bootmem,
 
         dir_cntrl.triggerQueue = MessageBuffer(ordered = True)
         dir_cntrl.L3triggerQueue = MessageBuffer(ordered = True)
+        dir_cntrl.requestToMemory = MessageBuffer()
+        dir_cntrl.responseFromMemory = MessageBuffer()
+
+        dir_cntrl.requestFromDMA = MessageBuffer(ordered=True)
+        dir_cntrl.requestFromDMA.slave = ruby_system.network.master
+
+        dir_cntrl.responseToDMA = MessageBuffer()
+        dir_cntrl.responseToDMA.master = ruby_system.network.slave
+
         dir_cntrl.requestToMemory = MessageBuffer()
         dir_cntrl.responseFromMemory = MessageBuffer()
 
@@ -640,7 +661,29 @@ def create_system(options, full_system, system, dma_devices, bootmem,
         # SQC also in GPU cluster
         gpuCluster.add(sqc_cntrl)
 
-    for i in range(options.num_cp):
+    for i in xrange(options.num_scalar_cache):
+        scalar_cntrl = SQCCntrl(TCC_select_num_bits = TCC_bits)
+        scalar_cntrl.create(options, ruby_system, system)
+
+        exec('ruby_system.scalar_cntrl%d = scalar_cntrl' % i)
+
+        cpu_sequencers.append(scalar_cntrl.sequencer)
+
+        scalar_cntrl.requestFromSQC = MessageBuffer(ordered = True)
+        scalar_cntrl.requestFromSQC.master = ruby_system.network.slave
+
+        scalar_cntrl.probeToSQC = MessageBuffer(ordered = True)
+        scalar_cntrl.probeToSQC.slave = ruby_system.network.master
+
+        scalar_cntrl.responseToSQC = MessageBuffer(ordered = True)
+        scalar_cntrl.responseToSQC.slave = ruby_system.network.master
+
+        scalar_cntrl.mandatoryQueue = \
+            MessageBuffer(buffer_size=options.scalar_buffer_size)
+
+        gpuCluster.add(scalar_cntrl)
+
+    for i in xrange(options.num_cp):
 
         tcp_ID = options.num_compute_units + i
         sqc_ID = options.num_sqc + i
@@ -735,13 +778,27 @@ def create_system(options, full_system, system, dma_devices, bootmem,
         # TCC cntrls added to the GPU cluster
         gpuCluster.add(tcc_cntrl)
 
-    # Assuming no DMA devices
-    assert(len(dma_devices) == 0)
+    for i, dma_device in enumerate(dma_devices):
+        dma_seq = DMASequencer(version=i, ruby_system=ruby_system)
+        dma_cntrl = DMA_Controller(version=i, dma_sequencer=dma_seq,
+                                   ruby_system=ruby_system)
+        exec('system.dma_cntrl%d = dma_cntrl' % i)
+        if dma_device.type == 'MemTest':
+            exec('system.dma_cntrl%d.dma_sequencer.slave = dma_devices.test'
+                 % i)
+        else:
+            exec('system.dma_cntrl%d.dma_sequencer.slave = dma_device.dma' % i)
+        dma_cntrl.requestToDir = MessageBuffer(buffer_size=0)
+        dma_cntrl.requestToDir.master = ruby_system.network.slave
+        dma_cntrl.responseFromDir = MessageBuffer(buffer_size=0)
+        dma_cntrl.responseFromDir.slave = ruby_system.network.master
+        dma_cntrl.mandatoryQueue = MessageBuffer(buffer_size = 0)
+        gpuCluster.add(dma_cntrl)
 
     # Add cpu/gpu clusters to main cluster
     mainCluster.add(cpuCluster)
     mainCluster.add(gpuCluster)
 
-    ruby_system.network.number_of_virtual_networks = 10
+    ruby_system.network.number_of_virtual_networks = 11
 
     return (cpu_sequencers, dir_cntrl_nodes, mainCluster)

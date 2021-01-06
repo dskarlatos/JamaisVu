@@ -49,8 +49,12 @@
 //
 
 external_type(MessageBuffer, buffer="yes", inport="yes", outport="yes");
-external_type(OutPort, primitive="yes");
 external_type(Scalar, primitive="yes");
+
+structure(OutPort, external = "yes", primitive="yes") {
+    void enqueueDeferredMessages(Addr addr, Tick curTime, Tick delay);
+    bool isDeferredMsgMapEmpty(Addr addr);
+}
 
 structure(InPort, external = "yes", primitive="yes") {
   bool isReady(Tick current_time);
@@ -59,6 +63,7 @@ structure(InPort, external = "yes", primitive="yes") {
   bool isEmpty();
   bool isStallMapEmpty();
   int getStallMapSize();
+  bool hasStalledMsg(Addr addr);
 }
 
 external_type(NodeID, default="0", primitive="yes");
@@ -127,49 +132,16 @@ structure (Sequencer, external = "yes") {
   // ll/sc support
   void writeCallbackScFail(Addr, DataBlock);
   bool llscCheckMonitor(Addr);
+  void llscClearLocalMonitor();
 
-  void checkCoherence(Addr);
   void evictionCallback(Addr);
   void recordRequestType(SequencerRequestType);
   bool checkResourceAvailable(CacheResourceType, Addr);
 }
 
-structure (GPUCoalescer, external = "yes") {
-  void readCallback(Addr, DataBlock);
-  void readCallback(Addr, MachineType, DataBlock);
-  void readCallback(Addr, MachineType, DataBlock,
-                    Cycles, Cycles, Cycles);
-  void readCallback(Addr, MachineType, DataBlock,
-                    Cycles, Cycles, Cycles, bool);
-  void writeCallback(Addr, DataBlock);
-  void writeCallback(Addr, MachineType, DataBlock);
-  void writeCallback(Addr, MachineType, DataBlock,
-                     Cycles, Cycles, Cycles);
-  void writeCallback(Addr, MachineType, DataBlock,
-                     Cycles, Cycles, Cycles, bool);
-  void checkCoherence(Addr);
-  void evictionCallback(Addr);
-  void recordCPReadCallBack(MachineID, MachineID);
-  void recordCPWriteCallBack(MachineID, MachineID);
-}
-
-structure (VIPERCoalescer, external = "yes") {
-  void readCallback(Addr, DataBlock);
-  void readCallback(Addr, MachineType, DataBlock);
-  void readCallback(Addr, MachineType, DataBlock,
-                    Cycles, Cycles, Cycles);
-  void readCallback(Addr, MachineType, DataBlock,
-                    Cycles, Cycles, Cycles, bool);
-  void writeCallback(Addr, DataBlock);
-  void writeCallback(Addr, MachineType, DataBlock);
-  void writeCallback(Addr, MachineType, DataBlock,
-                     Cycles, Cycles, Cycles);
-  void writeCallback(Addr, MachineType, DataBlock,
-                     Cycles, Cycles, Cycles, bool);
-  void invCallback(Addr);
-  void wbCallback(Addr);
-  void checkCoherence(Addr);
-  void evictionCallback(Addr);
+structure (HTMSequencer, interface="Sequencer", external = "yes") {
+  // hardware transactional memory
+  void htmCallback(Addr, HtmCallbackMode, HtmFailedInCacheReason);
 }
 
 structure(RubyRequest, desc="...", interface="Message", external="yes") {
@@ -184,9 +156,10 @@ structure(RubyRequest, desc="...", interface="Message", external="yes") {
   WriteMask writeMask,       desc="Writethrough mask";
   DataBlock WTData,          desc="Writethrough data block";
   int wfid,                  desc="Writethrough wavefront";
-  HSAScope scope,            desc="HSA scope";
-  HSASegment segment,        desc="HSA segment";
+  uint64_t instSeqNum,       desc="Instruction sequence number";
   PacketPtr pkt,             desc="Packet associated with this request";
+  bool htmFromTransaction,   desc="Memory request originates within a HTM transaction";
+  int htmTransactionUid,     desc="Used to identify the unique HTM transaction that produced this request";
 }
 
 structure(AbstractCacheEntry, primitive="yes", external = "yes") {
@@ -196,6 +169,7 @@ structure(AbstractCacheEntry, primitive="yes", external = "yes") {
 structure (DirectoryMemory, external = "yes") {
   AbstractCacheEntry allocate(Addr, AbstractCacheEntry);
   AbstractCacheEntry lookup(Addr);
+  void deallocate(Addr);
   bool isPresent(Addr);
   void invalidateBlock(Addr);
   void recordRequestType(DirectoryRequestType);
@@ -218,6 +192,10 @@ structure (CacheMemory, external = "yes") {
   void setMRU(AbstractCacheEntry);
   void recordRequestType(CacheRequestType, Addr);
   bool checkResourceAvailable(CacheResourceType, Addr);
+
+  // hardware transactional memory
+  void htmCommitTransaction();
+  void htmAbortTransaction();
 
   int getCacheSize();
   int getNumBlocks();

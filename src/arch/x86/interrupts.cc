@@ -266,20 +266,20 @@ X86ISA::Interrupts::requestInterrupt(uint8_t vector,
         }
     }
     if (FullSystem)
-        cpu->wakeup(0);
+        tc->getCpuPtr()->wakeup(0);
 }
 
 
 void
-X86ISA::Interrupts::setCPU(BaseCPU * newCPU)
+X86ISA::Interrupts::setThreadContext(ThreadContext *_tc)
 {
-    assert(newCPU);
-    if (cpu != NULL && cpu->cpuId() != newCPU->cpuId()) {
-        panic("Local APICs can't be moved between CPUs"
-                " with different IDs.\n");
-    }
-    cpu = newCPU;
-    initialApicId = cpu->cpuId();
+    assert(_tc);
+    panic_if(tc != NULL && tc->cpuId() != _tc->cpuId(),
+             "Local APICs can't be moved between CPUs with different IDs.");
+
+    BaseInterrupts::setThreadContext(_tc);
+
+    initialApicId = tc->cpuId();
     regs[APIC_ID] = (initialApicId << 24);
     pioAddr = x86LocalAPICAddress(initialApicId, 0);
 }
@@ -288,12 +288,12 @@ X86ISA::Interrupts::setCPU(BaseCPU * newCPU)
 void
 X86ISA::Interrupts::init()
 {
-    panic_if(!intMasterPort.isConnected(),
+    panic_if(!intRequestPort.isConnected(),
             "Int port not connected to anything!");
     panic_if(!pioPort.isConnected(),
             "Pio port of %s not connected to anything!", name());
 
-    intSlavePort.sendRangeChange();
+    intResponsePort.sendRangeChange();
     pioPort.sendRangeChange();
 }
 
@@ -343,7 +343,7 @@ X86ISA::Interrupts::completeIPI(PacketPtr pkt)
 AddrRangeList
 X86ISA::Interrupts::getAddrRanges() const
 {
-    assert(cpu);
+    assert(tc);
     AddrRangeList ranges;
     ranges.push_back(RangeSize(pioAddr, PageBytes));
     return ranges;
@@ -479,7 +479,7 @@ X86ISA::Interrupts::setReg(ApicRegIndex reg, uint32_t val)
             message.level = low.level;
             message.trigger = low.trigger;
             std::list<int> apics;
-            int numContexts = sys->numContexts();
+            int numContexts = sys->threads.size();
             switch (low.destShorthand) {
               case 0:
                 if (message.deliveryMode == DeliveryMode::LowestPriority) {
@@ -541,7 +541,7 @@ X86ISA::Interrupts::setReg(ApicRegIndex reg, uint32_t val)
             regs[APIC_INTERRUPT_COMMAND_LOW] = low;
             for (auto id: apics) {
                 PacketPtr pkt = buildIntTriggerPacket(id, message);
-                intMasterPort.sendMessage(pkt, sys->isTimingMode(),
+                intRequestPort.sendMessage(pkt, sys->isTimingMode(),
                         [this](PacketPtr pkt) { completeIPI(pkt); });
             }
             newVal = regs[APIC_INTERRUPT_COMMAND_LOW];
@@ -593,7 +593,7 @@ X86ISA::Interrupts::setReg(ApicRegIndex reg, uint32_t val)
 }
 
 
-X86ISA::Interrupts::Interrupts(Params * p)
+X86ISA::Interrupts::Interrupts(Params *p)
     : BaseInterrupts(p), sys(p->system), clockDomain(*p->clk_domain),
       apicTimerEvent([this]{ processApicTimerEvent(); }, name()),
       pendingSmi(false), smiVector(0),
@@ -602,9 +602,9 @@ X86ISA::Interrupts::Interrupts(Params * p)
       pendingInit(false), initVector(0),
       pendingStartup(false), startupVector(0),
       startedUp(false), pendingUnmaskableInt(false),
-      pendingIPIs(0), cpu(NULL),
-      intSlavePort(name() + ".int_slave", this, this),
-      intMasterPort(name() + ".int_master", this, this, p->int_latency),
+      pendingIPIs(0),
+      intResponsePort(name() + ".int_responder", this, this),
+      intRequestPort(name() + ".int_requestor", this, this, p->int_latency),
       pioPort(this), pioDelay(p->pio_latency)
 {
     memset(regs, 0, sizeof(regs));
@@ -618,7 +618,7 @@ X86ISA::Interrupts::Interrupts(Params * p)
 
 
 bool
-X86ISA::Interrupts::checkInterrupts(ThreadContext *tc) const
+X86ISA::Interrupts::checkInterrupts() const
 {
     RFLAGS rflags = tc->readMiscRegNoEffect(MISCREG_RFLAGS);
     if (pendingUnmaskableInt) {
@@ -648,9 +648,9 @@ X86ISA::Interrupts::checkInterruptsRaw() const
 }
 
 Fault
-X86ISA::Interrupts::getInterrupt(ThreadContext *tc)
+X86ISA::Interrupts::getInterrupt()
 {
-    assert(checkInterrupts(tc));
+    assert(checkInterrupts());
     // These are all probably fairly uncommon, so we'll make them easier to
     // check for.
     if (pendingUnmaskableInt) {
@@ -682,9 +682,9 @@ X86ISA::Interrupts::getInterrupt(ThreadContext *tc)
 }
 
 void
-X86ISA::Interrupts::updateIntrInfo(ThreadContext *tc)
+X86ISA::Interrupts::updateIntrInfo()
 {
-    assert(checkInterrupts(tc));
+    assert(checkInterrupts());
     if (pendingUnmaskableInt) {
         if (pendingSmi) {
             DPRINTF(LocalApic, "SMI sent to core.\n");

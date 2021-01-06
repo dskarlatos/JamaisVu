@@ -77,7 +77,7 @@ PowerProcess::initState()
 {
     Process::initState();
 
-    argsInit(MachineBytes, PageBytes);
+    argsInit(sizeof(uint32_t), PageBytes);
 }
 
 void
@@ -261,13 +261,13 @@ PowerProcess::argsInit(int intSize, int pageSize)
     auxv_array_end += sizeof(zero);
 
     copyStringArray(envp, envp_array_base, env_data_base,
-                    BigEndianByteOrder, *initVirtMem);
+                    ByteOrder::big, *initVirtMem);
     copyStringArray(argv, argv_array_base, arg_data_base,
-                    BigEndianByteOrder, *initVirtMem);
+                    ByteOrder::big, *initVirtMem);
 
     initVirtMem->writeBlob(argc_base, &guestArgc, intSize);
 
-    ThreadContext *tc = system->getThreadContext(contextIds[0]);
+    ThreadContext *tc = system->threads[contextIds[0]];
 
     //Set the stack pointer register
     tc->setIntReg(StackPointerReg, stack_min);

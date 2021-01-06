@@ -35,6 +35,7 @@
 
 #include <limits>
 
+#include "arch/x86/isa_traits.hh"
 #include "base/output.hh"
 #include "debug/GPUDisp.hh"
 #include "debug/GPUExec.hh"
@@ -42,53 +43,82 @@
 #include "debug/GPUMem.hh"
 #include "debug/GPUPort.hh"
 #include "debug/GPUPrefetch.hh"
+#include "debug/GPUReg.hh"
+#include "debug/GPURename.hh"
 #include "debug/GPUSync.hh"
 #include "debug/GPUTLB.hh"
 #include "gpu-compute/dispatcher.hh"
 #include "gpu-compute/gpu_dyn_inst.hh"
 #include "gpu-compute/gpu_static_inst.hh"
-#include "gpu-compute/ndrange.hh"
+#include "gpu-compute/scalar_register_file.hh"
 #include "gpu-compute/shader.hh"
 #include "gpu-compute/simple_pool_manager.hh"
 #include "gpu-compute/vector_register_file.hh"
 #include "gpu-compute/wavefront.hh"
 #include "mem/page_table.hh"
 #include "sim/process.hh"
+#include "sim/sim_exit.hh"
 
-ComputeUnit::ComputeUnit(const Params *p) : ClockedObject(p), fetchStage(p),
-    scoreboardCheckStage(p), scheduleStage(p), execStage(p),
-    globalMemoryPipe(p), localMemoryPipe(p), rrNextMemID(0), rrNextALUWp(0),
-    cu_id(p->cu_id), vrf(p->vector_register_file), numSIMDs(p->num_SIMDs),
-    spBypassPipeLength(p->spbypass_pipe_length),
-    dpBypassPipeLength(p->dpbypass_pipe_length),
-    issuePeriod(p->issue_period),
-    numGlbMemUnits(p->num_global_mem_pipes),
-    numLocMemUnits(p->num_shared_mem_pipes),
-    perLaneTLB(p->perLaneTLB), prefetchDepth(p->prefetch_depth),
-    prefetchStride(p->prefetch_stride), prefetchType(p->prefetch_prev_type),
-    xact_cas_mode(p->xactCasMode), debugSegFault(p->debugSegFault),
-    functionalTLB(p->functionalTLB), localMemBarrier(p->localMemBarrier),
-    countPages(p->countPages), barrier_id(0),
+ComputeUnit::ComputeUnit(const Params *p) : ClockedObject(p),
+    numVectorGlobalMemUnits(p->num_global_mem_pipes),
+    numVectorSharedMemUnits(p->num_shared_mem_pipes),
+    numScalarMemUnits(p->num_scalar_mem_pipes),
+    numVectorALUs(p->num_SIMDs),
+    numScalarALUs(p->num_scalar_cores),
     vrfToCoalescerBusWidth(p->vrf_to_coalescer_bus_width),
     coalescerToVrfBusWidth(p->coalescer_to_vrf_bus_width),
+    registerManager(p->register_manager),
+    fetchStage(p, *this),
+    scoreboardCheckStage(p, *this, scoreboardCheckToSchedule),
+    scheduleStage(p, *this, scoreboardCheckToSchedule, scheduleToExecute),
+    execStage(p, *this, scheduleToExecute),
+    globalMemoryPipe(p, *this),
+    localMemoryPipe(p, *this),
+    scalarMemoryPipe(p, *this),
+    tickEvent([this]{ exec(); }, "Compute unit tick event",
+          false, Event::CPU_Tick_Pri),
+    cu_id(p->cu_id),
+    vrf(p->vector_register_file), srf(p->scalar_register_file),
+    simdWidth(p->simd_width),
+    spBypassPipeLength(p->spbypass_pipe_length),
+    dpBypassPipeLength(p->dpbypass_pipe_length),
+    scalarPipeStages(p->scalar_pipe_length),
+    operandNetworkLength(p->operand_network_length),
+    issuePeriod(p->issue_period),
+    vrf_gm_bus_latency(p->vrf_gm_bus_latency),
+    srf_scm_bus_latency(p->srf_scm_bus_latency),
+    vrf_lm_bus_latency(p->vrf_lm_bus_latency),
+    perLaneTLB(p->perLaneTLB), prefetchDepth(p->prefetch_depth),
+    prefetchStride(p->prefetch_stride), prefetchType(p->prefetch_prev_type),
+    debugSegFault(p->debugSegFault),
+    functionalTLB(p->functionalTLB), localMemBarrier(p->localMemBarrier),
+    countPages(p->countPages),
     req_tick_latency(p->mem_req_latency * p->clk_domain->clockPeriod()),
     resp_tick_latency(p->mem_resp_latency * p->clk_domain->clockPeriod()),
-    _masterId(p->system->getMasterId(this, "ComputeUnit")),
-    lds(*p->localDataStore), _cacheLineSize(p->system->cacheLineSize()),
-    globalSeqNum(0), wavefrontSize(p->wfSize),
-    kernelLaunchInst(new KernelLaunchStaticInst())
+    _requestorId(p->system->getRequestorId(this, "ComputeUnit")),
+    lds(*p->localDataStore), gmTokenPort(name() + ".gmTokenPort", this),
+    ldsPort(csprintf("%s-port", name()), this),
+    scalarDataPort(csprintf("%s-port", name()), this),
+    scalarDTLBPort(csprintf("%s-port", name()), this),
+    sqcPort(csprintf("%s-port", name()), this),
+    sqcTLBPort(csprintf("%s-port", name()), this),
+    _cacheLineSize(p->system->cacheLineSize()),
+    _numBarrierSlots(p->num_barrier_slots),
+    globalSeqNum(0), wavefrontSize(p->wf_size),
+    scoreboardCheckToSchedule(p),
+    scheduleToExecute(p)
 {
     /**
      * This check is necessary because std::bitset only provides conversion
      * to unsigned long or unsigned long long via to_ulong() or to_ullong().
-     * there are * a few places in the code where to_ullong() is used, however
-     * if VSZ is larger than a value the host can support then bitset will
-     * throw a runtime exception. we should remove all use of to_long() or
-     * to_ullong() so we can have VSZ greater than 64b, however until that is
-     * done this assert is required.
+     * there are a few places in the code where to_ullong() is used, however
+     * if wavefrontSize is larger than a value the host can support then
+     * bitset will throw a runtime exception. We should remove all use of
+     * to_long() or to_ullong() so we can have wavefrontSize greater than 64b,
+     * however until that is done this assert is required.
      */
-    fatal_if(p->wfSize > std::numeric_limits<unsigned long long>::digits ||
-             p->wfSize <= 0,
+    fatal_if(p->wf_size > std::numeric_limits<unsigned long long>::digits ||
+             p->wf_size <= 0,
              "WF size is larger than the host can support");
     fatal_if(!isPowerOf2(wavefrontSize),
              "Wavefront size should be a power of 2");
@@ -101,10 +131,18 @@ ComputeUnit::ComputeUnit(const Params *p) : ClockedObject(p), fetchStage(p),
     numCyclesPerLoadTransfer = (wfSize() * sizeof(uint32_t))
                                / coalescerToVrfBusWidth;
 
-    lastVaddrWF.resize(numSIMDs);
-    wfList.resize(numSIMDs);
+    // Initialization: all WF slots are assumed STOPPED
+    idleWfs = p->n_wf * numVectorALUs;
+    lastVaddrWF.resize(numVectorALUs);
+    wfList.resize(numVectorALUs);
 
-    for (int j = 0; j < numSIMDs; ++j) {
+    wfBarrierSlots.resize(p->num_barrier_slots, WFBarrier());
+
+    for (int i = 0; i < p->num_barrier_slots; ++i) {
+        freeBarrierIds.insert(i);
+    }
+
+    for (int j = 0; j < numVectorALUs; ++j) {
         lastVaddrWF[j].resize(p->n_wf);
 
         for (int i = 0; i < p->n_wf; ++i) {
@@ -119,9 +157,9 @@ ComputeUnit::ComputeUnit(const Params *p) : ClockedObject(p), fetchStage(p),
         }
     }
 
-    lastVaddrSimd.resize(numSIMDs);
+    lastVaddrSimd.resize(numVectorALUs);
 
-    for (int i = 0; i < numSIMDs; ++i) {
+    for (int i = 0; i < numVectorALUs; ++i) {
         lastVaddrSimd[i].resize(wfSize(), 0);
     }
 
@@ -137,93 +175,136 @@ ComputeUnit::ComputeUnit(const Params *p) : ClockedObject(p), fetchStage(p),
         fatal("Invalid WF execution policy (CU)\n");
     }
 
-    memPort.resize(wfSize());
+    for (int i = 0; i < p->port_memory_port_connection_count; ++i) {
+        memPort.emplace_back(csprintf("%s-port%d", name(), i), this, i);
+    }
 
-    // resize the tlbPort vectorArray
-    int tlbPort_width = perLaneTLB ? wfSize() : 1;
-    tlbPort.resize(tlbPort_width);
+    for (int i = 0; i < p->port_translation_port_connection_count; ++i) {
+        tlbPort.emplace_back(csprintf("%s-port%d", name(), i), this, i);
+    }
 
-    cuExitCallback = new CUExitCallback(this);
-    registerExitCallback(cuExitCallback);
+    // Setup tokens for response ports. The number of tokens in memPortTokens
+    // is the total token count for the entire vector port (i.e., this CU).
+    memPortTokens = new TokenManager(p->max_cu_tokens);
 
-    xactCasLoadMap.clear();
-    lastExecCycle.resize(numSIMDs, 0);
+    registerExitCallback([this]() { exitCallback(); });
+
+    lastExecCycle.resize(numVectorALUs, 0);
 
     for (int i = 0; i < vrf.size(); ++i) {
         vrf[i]->setParent(this);
     }
-
+    for (int i = 0; i < srf.size(); ++i) {
+        srf[i]->setParent(this);
+    }
     numVecRegsPerSimd = vrf[0]->numRegs();
+    numScalarRegsPerSimd = srf[0]->numRegs();
+
+    registerManager->setParent(this);
+
+    activeWaves = 0;
+
+    instExecPerSimd.resize(numVectorALUs, 0);
+
+    // Calculate the number of bits to address a cache line
+    panic_if(!isPowerOf2(_cacheLineSize),
+        "Cache line size should be a power of two.");
+    cacheLineBits = floorLog2(_cacheLineSize);
 }
 
 ComputeUnit::~ComputeUnit()
 {
     // Delete wavefront slots
-    for (int j = 0; j < numSIMDs; ++j) {
+    for (int j = 0; j < numVectorALUs; ++j) {
         for (int i = 0; i < shader->n_wf; ++i) {
             delete wfList[j][i];
         }
         lastVaddrSimd[j].clear();
     }
     lastVaddrCU.clear();
-    readyList.clear();
-    waveStatusList.clear();
-    dispatchList.clear();
-    vectorAluInstAvail.clear();
-    delete cuExitCallback;
-    delete ldsPort;
 }
 
-void
-ComputeUnit::fillKernelState(Wavefront *w, NDRange *ndr)
+int
+ComputeUnit::numExeUnits() const
 {
-    w->resizeRegFiles(ndr->q.cRegCount, ndr->q.sRegCount, ndr->q.dRegCount);
+    return numVectorALUs + numScalarALUs + numVectorGlobalMemUnits +
+        numVectorSharedMemUnits + numScalarMemUnits;
+}
 
-    w->workGroupSz[0] = ndr->q.wgSize[0];
-    w->workGroupSz[1] = ndr->q.wgSize[1];
-    w->workGroupSz[2] = ndr->q.wgSize[2];
-    w->wgSz = w->workGroupSz[0] * w->workGroupSz[1] * w->workGroupSz[2];
-    w->gridSz[0] = ndr->q.gdSize[0];
-    w->gridSz[1] = ndr->q.gdSize[1];
-    w->gridSz[2] = ndr->q.gdSize[2];
-    w->kernelArgs = ndr->q.args;
-    w->privSizePerItem = ndr->q.privMemPerItem;
-    w->spillSizePerItem = ndr->q.spillMemPerItem;
-    w->roBase = ndr->q.roMemStart;
-    w->roSize = ndr->q.roMemTotal;
-    w->computeActualWgSz(ndr);
+// index into readyList of the first memory unit
+int
+ComputeUnit::firstMemUnit() const
+{
+    return numVectorALUs + numScalarALUs;
+}
+
+// index into readyList of the last memory unit
+int
+ComputeUnit::lastMemUnit() const
+{
+    return numExeUnits() - 1;
+}
+
+// index into scalarALUs vector of SALU used by the wavefront
+int
+ComputeUnit::mapWaveToScalarAlu(Wavefront *w) const
+{
+    if (numScalarALUs == 1) {
+        return 0;
+    } else {
+        return w->simdId % numScalarALUs;
+    }
+}
+
+// index into readyList of Scalar ALU unit used by wavefront
+int
+ComputeUnit::mapWaveToScalarAluGlobalIdx(Wavefront *w) const
+{
+    return numVectorALUs + mapWaveToScalarAlu(w);
+}
+
+// index into readyList of Global Memory unit used by wavefront
+int
+ComputeUnit::mapWaveToGlobalMem(Wavefront *w) const
+{
+    // TODO: FIXME if more than 1 GM pipe supported
+    return numVectorALUs + numScalarALUs;
+}
+
+// index into readyList of Local Memory unit used by wavefront
+int
+ComputeUnit::mapWaveToLocalMem(Wavefront *w) const
+{
+    // TODO: FIXME if more than 1 LM pipe supported
+    return numVectorALUs + numScalarALUs + numVectorGlobalMemUnits;
+}
+
+// index into readyList of Scalar Memory unit used by wavefront
+int
+ComputeUnit::mapWaveToScalarMem(Wavefront *w) const
+{
+    // TODO: FIXME if more than 1 ScM pipe supported
+    return numVectorALUs + numScalarALUs + numVectorGlobalMemUnits +
+        numVectorSharedMemUnits;
 }
 
 void
-ComputeUnit::updateEvents() {
-
-    if (!timestampVec.empty()) {
-        uint32_t vecSize = timestampVec.size();
-        uint32_t i = 0;
-        while (i < vecSize) {
-            if (timestampVec[i] <= shader->tick_cnt) {
-                std::pair<uint32_t, uint32_t> regInfo = regIdxVec[i];
-                vrf[regInfo.first]->markReg(regInfo.second, sizeof(uint32_t),
-                                            statusVec[i]);
-                timestampVec.erase(timestampVec.begin() + i);
-                regIdxVec.erase(regIdxVec.begin() + i);
-                statusVec.erase(statusVec.begin() + i);
-                --vecSize;
-                --i;
-            }
-            ++i;
-        }
-    }
-
-    for (int i = 0; i< numSIMDs; ++i) {
-        vrf[i]->updateEvents();
-    }
+ComputeUnit::fillKernelState(Wavefront *w, HSAQueueEntry *task)
+{
+    w->resizeRegFiles(task->numVectorRegs(), task->numScalarRegs());
+    w->workGroupSz[0] = task->wgSize(0);
+    w->workGroupSz[1] = task->wgSize(1);
+    w->workGroupSz[2] = task->wgSize(2);
+    w->wgSz = w->workGroupSz[0] * w->workGroupSz[1] * w->workGroupSz[2];
+    w->gridSz[0] = task->gridSize(0);
+    w->gridSz[1] = task->gridSize(1);
+    w->gridSz[2] = task->gridSize(2);
+    w->computeActualWgSz(task);
 }
-
 
 void
 ComputeUnit::startWavefront(Wavefront *w, int waveId, LdsChunk *ldsChunk,
-                            NDRange *ndr)
+                            HSAQueueEntry *task, int bar_id, bool fetchContext)
 {
     static int _n_wave = 0;
 
@@ -235,9 +316,17 @@ ComputeUnit::startWavefront(Wavefront *w, int waveId, LdsChunk *ldsChunk,
             init_mask[k] = 1;
     }
 
-    w->kernId = ndr->dispatchId;
+    w->execMask() = init_mask;
+
+    w->kernId = task->dispatchId();
     w->wfId = waveId;
     w->initMask = init_mask.to_ullong();
+
+    if (bar_id > WFBarrier::InvalidID) {
+        w->barrierId(bar_id);
+    } else {
+        assert(!w->hasBarrier());
+    }
 
     for (int k = 0; k < wfSize(); ++k) {
         w->workItemId[0][k] = (k + waveId * wfSize()) % w->actualWgSz[0];
@@ -251,37 +340,18 @@ ComputeUnit::startWavefront(Wavefront *w, int waveId, LdsChunk *ldsChunk,
             w->workItemId[0][k];
     }
 
-    w->barrierSlots = divCeil(w->actualWgSzTotal, wfSize());
-
-    w->barCnt.resize(wfSize(), 0);
-
-    w->maxBarCnt = 0;
-    w->oldBarrierCnt = 0;
-    w->barrierCnt = 0;
-
-    w->privBase = ndr->q.privMemStart;
-    ndr->q.privMemStart += ndr->q.privMemPerItem * wfSize();
-
-    w->spillBase = ndr->q.spillMemStart;
-    ndr->q.spillMemStart += ndr->q.spillMemPerItem * wfSize();
-
-    w->pushToReconvergenceStack(0, UINT32_MAX, init_mask.to_ulong());
-
     // WG state
-    w->wgId = ndr->globalWgId;
-    w->dispatchId = ndr->dispatchId;
-    w->workGroupId[0] = w->wgId % ndr->numWg[0];
-    w->workGroupId[1] = (w->wgId / ndr->numWg[0]) % ndr->numWg[1];
-    w->workGroupId[2] = w->wgId / (ndr->numWg[0] * ndr->numWg[1]);
-
-    w->barrierId = barrier_id;
-    w->stalledAtBarrier = false;
+    w->wgId = task->globalWgId();
+    w->dispatchId = task->dispatchId();
+    w->workGroupId[0] = w->wgId % task->numWg(0);
+    w->workGroupId[1] = (w->wgId / task->numWg(0)) % task->numWg(1);
+    w->workGroupId[2] = w->wgId / (task->numWg(0) * task->numWg(1));
 
     // set the wavefront context to have a pointer to this section of the LDS
     w->ldsChunk = ldsChunk;
 
     int32_t refCount M5_VAR_USED =
-                    lds.increaseRefCounter(w->dispatchId, w->wgId);
+                lds.increaseRefCounter(w->dispatchId, w->wgId);
     DPRINTF(GPUDisp, "CU%d: increase ref ctr wg[%d] to [%d]\n",
                     cu_id, w->wgId, refCount);
 
@@ -290,85 +360,155 @@ ComputeUnit::startWavefront(Wavefront *w, int waveId, LdsChunk *ldsChunk,
     if (w->pendingFetch)
         w->dropFetch = true;
 
-    // is this the last wavefront in the workgroup
-    // if set the spillWidth to be the remaining work-items
-    // so that the vector access is correct
-    if ((waveId + 1) * wfSize() >= w->actualWgSzTotal) {
-        w->spillWidth = w->actualWgSzTotal - (waveId * wfSize());
-    } else {
-        w->spillWidth = wfSize();
-    }
-
     DPRINTF(GPUDisp, "Scheduling wfDynId/barrier_id %d/%d on CU%d: "
-            "WF[%d][%d]\n", _n_wave, barrier_id, cu_id, w->simdId, w->wfSlotId);
+            "WF[%d][%d]. Ref cnt:%d\n", _n_wave, w->barrierId(), cu_id,
+            w->simdId, w->wfSlotId, refCount);
 
-    w->start(++_n_wave, ndr->q.code_ptr);
+    w->initRegState(task, w->actualWgSzTotal);
+    w->start(_n_wave++, task->codeAddr());
+
+    waveLevelParallelism.sample(activeWaves);
+    activeWaves++;
+}
+
+/**
+ * trigger invalidate operation in the cu
+ *
+ * req: request initialized in shader, carrying the invlidate flags
+ */
+void
+ComputeUnit::doInvalidate(RequestPtr req, int kernId){
+    GPUDynInstPtr gpuDynInst
+        = std::make_shared<GPUDynInst>(this, nullptr,
+            new KernelLaunchStaticInst(), getAndIncSeqNum());
+
+    // kern_id will be used in inv responses
+    gpuDynInst->kern_id = kernId;
+    // update contextId field
+    req->setContext(gpuDynInst->wfDynId);
+
+    injectGlobalMemFence(gpuDynInst, true, req);
+}
+
+/**
+ * trigger flush operation in the cu
+ *
+ * gpuDynInst: inst passed to the request
+ */
+void
+ComputeUnit::doFlush(GPUDynInstPtr gpuDynInst) {
+    injectGlobalMemFence(gpuDynInst, true);
 }
 
 void
-ComputeUnit::StartWorkgroup(NDRange *ndr)
+ComputeUnit::dispWorkgroup(HSAQueueEntry *task, int num_wfs_in_wg)
 {
+    // If we aren't ticking, start it up!
+    if (!tickEvent.scheduled()) {
+        DPRINTF(GPUDisp, "CU%d: Scheduling wakeup next cycle\n", cu_id);
+        schedule(tickEvent, nextCycle());
+    }
+
+    // the kernel's invalidate must have finished before any wg dispatch
+    assert(task->isInvDone());
+
     // reserve the LDS capacity allocated to the work group
     // disambiguated by the dispatch ID and workgroup ID, which should be
     // globally unique
-    LdsChunk *ldsChunk = lds.reserveSpace(ndr->dispatchId, ndr->globalWgId,
-                                          ndr->q.ldsSize);
+    LdsChunk *ldsChunk = lds.reserveSpace(task->dispatchId(),
+                                          task->globalWgId(),
+                                          task->ldsSize());
 
-    // Send L1 cache acquire
-    // isKernel + isAcquire = Kernel Begin
-    if (shader->impl_kern_boundary_sync) {
-        GPUDynInstPtr gpuDynInst =
-            std::make_shared<GPUDynInst>(this, nullptr, kernelLaunchInst,
-                                         getAndIncSeqNum());
+    panic_if(!ldsChunk, "was not able to reserve space for this WG");
 
-        gpuDynInst->useContinuation = false;
-        injectGlobalMemFence(gpuDynInst, true);
-    }
-
-    // calculate the number of 32-bit vector registers required by wavefront
-    int vregDemand = ndr->q.sRegCount + (2 * ndr->q.dRegCount);
+    // calculate the number of 32-bit vector registers required
+    // by each work item
+    int vregDemand = task->numVectorRegs();
+    int sregDemand = task->numScalarRegs();
     int wave_id = 0;
 
-    // Assign WFs by spreading them across SIMDs, 1 WF per SIMD at a time
-    for (int m = 0; m < shader->n_wf * numSIMDs; ++m) {
-        Wavefront *w = wfList[m % numSIMDs][m / numSIMDs];
-        // Check if this wavefront slot is available:
-        // It must be stopped and not waiting
-        // for a release to complete S_RETURNING
-        if (w->status == Wavefront::S_STOPPED) {
-            fillKernelState(w, ndr);
-            // if we have scheduled all work items then stop
-            // scheduling wavefronts
-            if (wave_id * wfSize() >= w->actualWgSzTotal)
-                break;
+    int barrier_id = WFBarrier::InvalidID;
 
-            // reserve vector registers for the scheduled wavefront
-            assert(vectorRegsReserved[m % numSIMDs] <= numVecRegsPerSimd);
-            uint32_t normSize = 0;
+    /**
+     * If this WG only has one WF it will not consume any barrier
+     * resources because it has no need of them.
+     */
+    if (num_wfs_in_wg > 1) {
+        /**
+         * Find a free barrier slot for this WG. Each WF in the WG will
+         * receive the same barrier ID.
+         */
+        barrier_id = getFreeBarrierId();
+        auto &wf_barrier = barrierSlot(barrier_id);
+        assert(!wf_barrier.maxBarrierCnt());
+        assert(!wf_barrier.numAtBarrier());
+        wf_barrier.setMaxBarrierCnt(num_wfs_in_wg);
 
-            w->startVgprIndex = vrf[m % numSIMDs]->manager->
-                                    allocateRegion(vregDemand, &normSize);
+        DPRINTF(GPUSync, "CU[%d] - Dispatching WG with barrier Id%d. "
+                "%d waves using this barrier.\n", cu_id, barrier_id,
+                num_wfs_in_wg);
+    }
 
-            w->reservedVectorRegs = normSize;
-            vectorRegsReserved[m % numSIMDs] += w->reservedVectorRegs;
+    // Assign WFs according to numWfsToSched vector, which is computed by
+    // hasDispResources()
+    for (int j = 0; j < shader->n_wf; ++j) {
+        for (int i = 0; i < numVectorALUs; ++i) {
+            Wavefront *w = wfList[i][j];
+            // Check if this wavefront slot is available and there are WFs
+            // remaining to be dispatched to current SIMD:
+            // WF slot must be stopped and not waiting
+            // for a release to complete S_RETURNING
+            if (w->getStatus() == Wavefront::S_STOPPED &&
+                numWfsToSched[i] > 0) {
+                // decrement number of WFs awaiting dispatch to current SIMD
+                numWfsToSched[i] -= 1;
 
-            startWavefront(w, wave_id, ldsChunk, ndr);
-            ++wave_id;
+                fillKernelState(w, task);
+
+                DPRINTF(GPURename, "SIMD[%d] wfSlotId[%d] WF[%d] "
+                    "vregDemand[%d] sregDemand[%d]\n", i, j, w->wfDynId,
+                    vregDemand, sregDemand);
+
+                registerManager->allocateRegisters(w, vregDemand, sregDemand);
+
+                startWavefront(w, wave_id, ldsChunk, task, barrier_id);
+                ++wave_id;
+            }
         }
     }
-    ++barrier_id;
 }
 
-int
-ComputeUnit::ReadyWorkgroup(NDRange *ndr)
+void
+ComputeUnit::insertInPipeMap(Wavefront *w)
 {
-    // Get true size of workgroup (after clamping to grid size)
-    int trueWgSize[3];
+    panic_if(w->instructionBuffer.empty(),
+             "Instruction Buffer of WF%d can't be empty", w->wgId);
+    GPUDynInstPtr ii = w->instructionBuffer.front();
+    pipeMap.emplace(ii->seqNum());
+}
+
+void
+ComputeUnit::deleteFromPipeMap(Wavefront *w)
+{
+    panic_if(w->instructionBuffer.empty(),
+             "Instruction Buffer of WF%d can't be empty", w->wgId);
+    GPUDynInstPtr ii = w->instructionBuffer.front();
+    // delete the dynamic instruction from the pipeline map
+    auto it = pipeMap.find(ii->seqNum());
+    panic_if(it == pipeMap.end(), "Pipeline Map is empty\n");
+    pipeMap.erase(it);
+}
+
+bool
+ComputeUnit::hasDispResources(HSAQueueEntry *task, int &num_wfs_in_wg)
+{
+    // compute true size of workgroup (after clamping to grid size)
+    int trueWgSize[HSAQueueEntry::MAX_DIM];
     int trueWgSizeTotal = 1;
 
-    for (int d = 0; d < 3; ++d) {
-        trueWgSize[d] = std::min(ndr->q.wgSize[d], ndr->q.gdSize[d] -
-                                 ndr->wgId[d] * ndr->q.wgSize[d]);
+    for (int d = 0; d < HSAQueueEntry::MAX_DIM; ++d) {
+        trueWgSize[d] = std::min(task->wgSize(d), task->gridSize(d) -
+                                 task->wgId(d) * task->wgSize(d));
 
         trueWgSizeTotal *= trueWgSize[d];
         DPRINTF(GPUDisp, "trueWgSize[%d] =  %d\n", d, trueWgSize[d]);
@@ -376,163 +516,204 @@ ComputeUnit::ReadyWorkgroup(NDRange *ndr)
 
     DPRINTF(GPUDisp, "trueWgSizeTotal =  %d\n", trueWgSizeTotal);
 
+    // calculate the number of WFs in this WG
+    int numWfs = (trueWgSizeTotal + wfSize() - 1) / wfSize();
+    num_wfs_in_wg = numWfs;
+
+    bool barrier_avail = true;
+
+    if (numWfs > 1 && !freeBarrierIds.size()) {
+        barrier_avail = false;
+    }
+
     // calculate the number of 32-bit vector registers required by each
     // work item of the work group
-    int vregDemandPerWI = ndr->q.sRegCount + (2 * ndr->q.dRegCount);
-    bool vregAvail = true;
-    int numWfs = (trueWgSizeTotal + wfSize() - 1) / wfSize();
+    int vregDemandPerWI = task->numVectorRegs();
+    // calculate the number of 32-bit scalar registers required by each
+    // work item of the work group
+    int sregDemandPerWI = task->numScalarRegs();
+
+    // check if the total number of VGPRs snd SGPRs required by all WFs
+    // of the WG fit in the VRFs of all SIMD units and the CU's SRF
+    panic_if((numWfs * vregDemandPerWI) > (numVectorALUs * numVecRegsPerSimd),
+             "WG with %d WFs and %d VGPRs per WI can not be allocated to CU "
+             "that has %d VGPRs\n",
+             numWfs, vregDemandPerWI, numVectorALUs * numVecRegsPerSimd);
+    panic_if((numWfs * sregDemandPerWI) > numScalarRegsPerSimd,
+             "WG with %d WFs and %d SGPRs per WI can not be scheduled to CU "
+             "with %d SGPRs\n",
+             numWfs, sregDemandPerWI, numScalarRegsPerSimd);
+
+    // number of WF slots that are not occupied
     int freeWfSlots = 0;
-    // check if the total number of VGPRs required by all WFs of the WG
-    // fit in the VRFs of all SIMD units
-    assert((numWfs * vregDemandPerWI) <= (numSIMDs * numVecRegsPerSimd));
+    // number of Wfs from WG that were successfully mapped to a SIMD
     int numMappedWfs = 0;
-    std::vector<int> numWfsPerSimd;
-    numWfsPerSimd.resize(numSIMDs, 0);
-    // find how many free WF slots we have across all SIMDs
+    numWfsToSched.clear();
+    numWfsToSched.resize(numVectorALUs, 0);
+
+    // attempt to map WFs to the SIMDs, based on WF slot availability
+    // and register file availability
     for (int j = 0; j < shader->n_wf; ++j) {
-        for (int i = 0; i < numSIMDs; ++i) {
-            if (wfList[i][j]->status == Wavefront::S_STOPPED) {
-                // count the number of free WF slots
+        for (int i = 0; i < numVectorALUs; ++i) {
+            if (wfList[i][j]->getStatus() == Wavefront::S_STOPPED) {
                 ++freeWfSlots;
-                if (numMappedWfs < numWfs) {
-                    // count the WFs to be assigned per SIMD
-                    numWfsPerSimd[i]++;
+                // check if current WF will fit onto current SIMD/VRF
+                // if all WFs have not yet been mapped to the SIMDs
+                if (numMappedWfs < numWfs &&
+                    registerManager->canAllocateSgprs(i, numWfsToSched[i] + 1,
+                                                      sregDemandPerWI) &&
+                    registerManager->canAllocateVgprs(i, numWfsToSched[i] + 1,
+                                                      vregDemandPerWI)) {
+                    numWfsToSched[i]++;
+                    numMappedWfs++;
                 }
-                numMappedWfs++;
             }
         }
     }
 
-    // if there are enough free WF slots then find if there are enough
-    // free VGPRs per SIMD based on the WF->SIMD mapping
-    if (freeWfSlots >= numWfs) {
-        for (int j = 0; j < numSIMDs; ++j) {
-            // find if there are enough free VGPR regions in the SIMD's VRF
-            // to accommodate the WFs of the new WG that would be mapped to
-            // this SIMD unit
-            vregAvail = vrf[j]->manager->canAllocate(numWfsPerSimd[j],
-                                                     vregDemandPerWI);
+    // check that the number of mapped WFs is not greater
+    // than the actual number of WFs
+    assert(numMappedWfs <= numWfs);
 
-            // stop searching if there is at least one SIMD
-            // whose VRF does not have enough free VGPR pools.
-            // This is because a WG is scheduled only if ALL
-            // of its WFs can be scheduled
-            if (!vregAvail)
-                break;
+    bool vregAvail = true;
+    bool sregAvail = true;
+    // if a WF to SIMD mapping was not found, find the limiting resource
+    if (numMappedWfs < numWfs) {
+
+        for (int j = 0; j < numVectorALUs; ++j) {
+            // find if there are enough free VGPRs in the SIMD's VRF
+            // to accomodate the WFs of the new WG that would be mapped
+            // to this SIMD unit
+            vregAvail &= registerManager->
+                canAllocateVgprs(j, numWfsToSched[j], vregDemandPerWI);
+            // find if there are enough free SGPRs in the SIMD's SRF
+            // to accomodate the WFs of the new WG that would be mapped
+            // to this SIMD unit
+            sregAvail &= registerManager->
+                canAllocateSgprs(j, numWfsToSched[j], sregDemandPerWI);
         }
     }
 
-    DPRINTF(GPUDisp, "Free WF slots =  %d, VGPR Availability = %d\n",
-            freeWfSlots, vregAvail);
+    DPRINTF(GPUDisp, "Free WF slots =  %d, Mapped WFs = %d, \
+            VGPR Availability = %d, SGPR Availability = %d\n",
+            freeWfSlots, numMappedWfs, vregAvail, sregAvail);
 
     if (!vregAvail) {
         ++numTimesWgBlockedDueVgprAlloc;
     }
 
+    if (!sregAvail) {
+        ++numTimesWgBlockedDueSgprAlloc;
+    }
+
     // Return true if enough WF slots to submit workgroup and if there are
     // enough VGPRs to schedule all WFs to their SIMD units
-    if (!lds.canReserve(ndr->q.ldsSize)) {
+    bool ldsAvail = lds.canReserve(task->ldsSize());
+    if (!ldsAvail) {
         wgBlockedDueLdsAllocation++;
     }
 
-    // Return true if (a) there are enough free WF slots to submit
-    // workgrounp and (b) if there are enough VGPRs to schedule all WFs to their
-    // SIMD units and (c) if there is enough space in LDS
-    return freeWfSlots >= numWfs && vregAvail && lds.canReserve(ndr->q.ldsSize);
+    if (!barrier_avail) {
+        wgBlockedDueBarrierAllocation++;
+    }
+
+    // Return true if the following are all true:
+    // (a) all WFs of the WG were mapped to free WF slots
+    // (b) there are enough VGPRs to schedule all WFs to their SIMD units
+    // (c) there are enough SGPRs on the CU to schedule all WFs
+    // (d) there is enough space in LDS to allocate for all WFs
+    bool can_dispatch = numMappedWfs == numWfs && vregAvail && sregAvail
+                        && ldsAvail && barrier_avail;
+    return can_dispatch;
 }
 
 int
-ComputeUnit::AllAtBarrier(uint32_t _barrier_id, uint32_t bcnt, uint32_t bslots)
+ComputeUnit::numYetToReachBarrier(int bar_id)
 {
-    DPRINTF(GPUSync, "CU%d: Checking for All At Barrier\n", cu_id);
-    int ccnt = 0;
-
-    for (int i_simd = 0; i_simd < numSIMDs; ++i_simd) {
-        for (int i_wf = 0; i_wf < shader->n_wf; ++i_wf) {
-            Wavefront *w = wfList[i_simd][i_wf];
-
-            if (w->status == Wavefront::S_RUNNING) {
-                DPRINTF(GPUSync, "Checking WF[%d][%d]\n", i_simd, i_wf);
-
-                DPRINTF(GPUSync, "wf->barrier_id = %d, _barrier_id = %d\n",
-                        w->barrierId, _barrier_id);
-
-                DPRINTF(GPUSync, "wf->barrier_cnt %d, bcnt = %d\n",
-                        w->barrierCnt, bcnt);
-            }
-
-            if (w->status == Wavefront::S_RUNNING &&
-                w->barrierId == _barrier_id && w->barrierCnt == bcnt &&
-                !w->outstandingReqs) {
-                ++ccnt;
-
-                DPRINTF(GPUSync, "WF[%d][%d] at barrier, increment ccnt to "
-                        "%d\n", i_simd, i_wf, ccnt);
-            }
-        }
-    }
-
-    DPRINTF(GPUSync, "CU%d: returning allAtBarrier ccnt = %d, bslots = %d\n",
-            cu_id, ccnt, bslots);
-
-    return ccnt == bslots;
+    auto &wf_barrier = barrierSlot(bar_id);
+    return wf_barrier.numYetToReachBarrier();
 }
 
-//  Check if the current wavefront is blocked on additional resources.
 bool
-ComputeUnit::cedeSIMD(int simdId, int wfSlotId)
+ComputeUnit::allAtBarrier(int bar_id)
 {
-    bool cede = false;
+    auto &wf_barrier = barrierSlot(bar_id);
+    return wf_barrier.allAtBarrier();
+}
 
-    // If --xact-cas-mode option is enabled in run.py, then xact_cas_ld
-    // magic instructions will impact the scheduling of wavefronts
-    if (xact_cas_mode) {
-        /*
-         * When a wavefront calls xact_cas_ld, it adds itself to a per address
-         * queue. All per address queues are managed by the xactCasLoadMap.
-         *
-         * A wavefront is not blocked if: it is not in ANY per address queue or
-         * if it is at the head of a per address queue.
-         */
-        for (auto itMap : xactCasLoadMap) {
-            std::list<waveIdentifier> curWaveIDQueue = itMap.second.waveIDQueue;
+void
+ComputeUnit::incNumAtBarrier(int bar_id)
+{
+    auto &wf_barrier = barrierSlot(bar_id);
+    wf_barrier.incNumAtBarrier();
+}
 
-            if (!curWaveIDQueue.empty()) {
-                for (auto it : curWaveIDQueue) {
-                    waveIdentifier cur_wave = it;
+int
+ComputeUnit::numAtBarrier(int bar_id)
+{
+    auto &wf_barrier = barrierSlot(bar_id);
+    return wf_barrier.numAtBarrier();
+}
 
-                    if (cur_wave.simdId == simdId &&
-                        cur_wave.wfSlotId == wfSlotId) {
-                        // 2 possibilities
-                        // 1: this WF has a green light
-                        // 2: another WF has a green light
-                        waveIdentifier owner_wave = curWaveIDQueue.front();
+int
+ComputeUnit::maxBarrierCnt(int bar_id)
+{
+    auto &wf_barrier = barrierSlot(bar_id);
+    return wf_barrier.maxBarrierCnt();
+}
 
-                        if (owner_wave.simdId != cur_wave.simdId ||
-                            owner_wave.wfSlotId != cur_wave.wfSlotId) {
-                            // possibility 2
-                            cede = true;
-                            break;
-                        } else {
-                            // possibility 1
-                            break;
-                        }
-                    }
-                }
+void
+ComputeUnit::resetBarrier(int bar_id)
+{
+    auto &wf_barrier = barrierSlot(bar_id);
+    wf_barrier.reset();
+}
+
+void
+ComputeUnit::decMaxBarrierCnt(int bar_id)
+{
+    auto &wf_barrier = barrierSlot(bar_id);
+    wf_barrier.decMaxBarrierCnt();
+}
+
+void
+ComputeUnit::releaseBarrier(int bar_id)
+{
+    auto &wf_barrier = barrierSlot(bar_id);
+    wf_barrier.release();
+    freeBarrierIds.insert(bar_id);
+}
+
+void
+ComputeUnit::releaseWFsFromBarrier(int bar_id)
+{
+    for (int i = 0; i < numVectorALUs; ++i) {
+        for (int j = 0; j < shader->n_wf; ++j) {
+            Wavefront *wf = wfList[i][j];
+            if (wf->barrierId() == bar_id) {
+                assert(wf->getStatus() == Wavefront::S_BARRIER);
+                wf->setStatus(Wavefront::S_RUNNING);
             }
         }
     }
-
-    return cede;
 }
 
 // Execute one clock worth of work on the ComputeUnit.
 void
 ComputeUnit::exec()
 {
-    updateEvents();
+    // process reads and writes in the RFs
+    for (auto &vecRegFile : vrf) {
+        vecRegFile->exec();
+    }
+
+    for (auto &scRegFile : srf) {
+        scRegFile->exec();
+    }
+
     // Execute pipeline stages in reverse order to simulate
     // the pipeline latency
+    scalarMemoryPipe.exec();
     globalMemoryPipe.exec();
     localMemoryPipe.exec();
     execStage.exec();
@@ -541,77 +722,63 @@ ComputeUnit::exec()
     fetchStage.exec();
 
     totalCycles++;
+
+    // Put this CU to sleep if there is no more work to be done.
+    if (!isDone()) {
+        schedule(tickEvent, nextCycle());
+    } else {
+        shader->notifyCuSleep();
+        DPRINTF(GPUDisp, "CU%d: Going to sleep\n", cu_id);
+    }
 }
 
 void
 ComputeUnit::init()
 {
-    // Initialize CU Bus models
-    glbMemToVrfBus.init(&shader->tick_cnt, shader->ticks(1));
-    locMemToVrfBus.init(&shader->tick_cnt, shader->ticks(1));
-    nextGlbMemBus = 0;
-    nextLocMemBus = 0;
-    fatal_if(numGlbMemUnits > 1,
+    // Initialize CU Bus models and execution resources
+
+    // Vector ALUs
+    vectorALUs.clear();
+    for (int i = 0; i < numVectorALUs; i++) {
+        vectorALUs.emplace_back(this, clockPeriod());
+    }
+
+    // Scalar ALUs
+    scalarALUs.clear();
+    for (int i = 0; i < numScalarALUs; i++) {
+        scalarALUs.emplace_back(this, clockPeriod());
+    }
+
+    // Vector Global Memory
+    fatal_if(numVectorGlobalMemUnits > 1,
              "No support for multiple Global Memory Pipelines exists!!!");
-    vrfToGlobalMemPipeBus.resize(numGlbMemUnits);
-    for (int j = 0; j < numGlbMemUnits; ++j) {
-        vrfToGlobalMemPipeBus[j] = WaitClass();
-        vrfToGlobalMemPipeBus[j].init(&shader->tick_cnt, shader->ticks(1));
-    }
+    vectorGlobalMemUnit.init(this, clockPeriod());
+    vrfToGlobalMemPipeBus.init(this, clockPeriod());
+    glbMemToVrfBus.init(this, clockPeriod());
 
-    fatal_if(numLocMemUnits > 1,
+    // Vector Local/Shared Memory
+    fatal_if(numVectorSharedMemUnits > 1,
              "No support for multiple Local Memory Pipelines exists!!!");
-    vrfToLocalMemPipeBus.resize(numLocMemUnits);
-    for (int j = 0; j < numLocMemUnits; ++j) {
-        vrfToLocalMemPipeBus[j] = WaitClass();
-        vrfToLocalMemPipeBus[j].init(&shader->tick_cnt, shader->ticks(1));
-    }
-    vectorRegsReserved.resize(numSIMDs, 0);
-    aluPipe.resize(numSIMDs);
-    wfWait.resize(numSIMDs + numLocMemUnits + numGlbMemUnits);
+    vectorSharedMemUnit.init(this, clockPeriod());
+    vrfToLocalMemPipeBus.init(this, clockPeriod());
+    locMemToVrfBus.init(this, clockPeriod());
 
-    for (int i = 0; i < numSIMDs + numLocMemUnits + numGlbMemUnits; ++i) {
-        wfWait[i] = WaitClass();
-        wfWait[i].init(&shader->tick_cnt, shader->ticks(1));
-    }
+    // Scalar Memory
+    fatal_if(numScalarMemUnits > 1,
+             "No support for multiple Scalar Memory Pipelines exists!!!");
+    scalarMemUnit.init(this, clockPeriod());
+    srfToScalarMemPipeBus.init(this, clockPeriod());
+    scalarMemToSrfBus.init(this, clockPeriod());
 
-    for (int i = 0; i < numSIMDs; ++i) {
-        aluPipe[i] = WaitClass();
-        aluPipe[i].init(&shader->tick_cnt, shader->ticks(1));
-    }
+    vectorRegsReserved.resize(numVectorALUs, 0);
+    scalarRegsReserved.resize(numVectorALUs, 0);
 
-    // Setup space for call args
-    for (int j = 0; j < numSIMDs; ++j) {
-        for (int i = 0; i < shader->n_wf; ++i) {
-            wfList[j][i]->initCallArgMem(shader->funcargs_size, wavefrontSize);
-        }
-    }
+    fetchStage.init();
+    scheduleStage.init();
+    execStage.init();
+    globalMemoryPipe.init();
 
-    // Initializing pipeline resources
-    readyList.resize(numSIMDs + numGlbMemUnits + numLocMemUnits);
-    waveStatusList.resize(numSIMDs);
-
-    for (int j = 0; j < numSIMDs; ++j) {
-        for (int i = 0; i < shader->n_wf; ++i) {
-            waveStatusList[j].push_back(
-                std::make_pair(wfList[j][i], BLOCKED));
-        }
-    }
-
-    for (int j = 0; j < (numSIMDs + numGlbMemUnits + numLocMemUnits); ++j) {
-        dispatchList.push_back(std::make_pair((Wavefront*)nullptr, EMPTY));
-    }
-
-    fetchStage.init(this);
-    scoreboardCheckStage.init(this);
-    scheduleStage.init(this);
-    execStage.init(this);
-    globalMemoryPipe.init(this);
-    localMemoryPipe.init(this);
-    // initialize state for statistics calculation
-    vectorAluInstAvail.resize(numSIMDs, false);
-    shrMemInstAvail = 0;
-    glbMemInstAvail = 0;
+    gmTokenPort.setTokenManager(memPortTokens);
 }
 
 bool
@@ -621,61 +788,172 @@ ComputeUnit::DataPort::recvTimingResp(PacketPtr pkt)
     // appropriate cycle to process the timing memory response
     // This delay represents the pipeline delay
     SenderState *sender_state = safe_cast<SenderState*>(pkt->senderState);
-    int index = sender_state->port_index;
+    PortID index = sender_state->port_index;
     GPUDynInstPtr gpuDynInst = sender_state->_gpuDynInst;
+    GPUDispatcher &dispatcher = computeUnit->shader->dispatcher();
 
-    // Is the packet returned a Kernel End or Barrier
-    if (pkt->req->isKernel() && pkt->req->isRelease()) {
-        Wavefront *w =
-            computeUnit->wfList[gpuDynInst->simdId][gpuDynInst->wfSlotId];
+    // MemSyncResp + WriteAckResp are handled completely here and we don't
+    // schedule a MemRespEvent to process the responses further
+    if (pkt->cmd == MemCmd::MemSyncResp) {
+        // This response is for 1 of the following request types:
+        //  - kernel launch
+        //  - kernel end
+        //  - non-kernel mem sync
 
-        // Check if we are waiting on Kernel End Release
-        if (w->status == Wavefront::S_RETURNING) {
-            DPRINTF(GPUDisp, "CU%d: WF[%d][%d][wv=%d]: WG id completed %d\n",
-                    computeUnit->cu_id, w->simdId, w->wfSlotId,
-                    w->wfDynId, w->kernId);
+        // Kernel Launch
+        // wavefront was nullptr when launching kernel, so it is meaningless
+        // here (simdId=-1, wfSlotId=-1)
+        if (gpuDynInst->isKernelLaunch()) {
+            // for kernel launch, the original request must be both kernel-type
+            // and acquire
+            assert(pkt->req->isKernel());
+            assert(pkt->req->isAcquire());
 
-            computeUnit->shader->dispatcher->notifyWgCompl(w);
-            w->status = Wavefront::S_STOPPED;
-        } else {
-            w->outstandingReqs--;
+            // one D-Cache inv is done, decrement counter
+            dispatcher.updateInvCounter(gpuDynInst->kern_id);
+
+            delete pkt->senderState;
+            delete pkt;
+            return true;
         }
 
-        DPRINTF(GPUSync, "CU%d: WF[%d][%d]: barrier_cnt = %d\n",
-                computeUnit->cu_id, gpuDynInst->simdId,
-                gpuDynInst->wfSlotId, w->barrierCnt);
+        // retrieve wavefront from inst
+        Wavefront *w = gpuDynInst->wavefront();
 
-        if (gpuDynInst->useContinuation) {
-            assert(!gpuDynInst->isNoScope());
-            gpuDynInst->execContinuation(gpuDynInst->staticInstruction(),
-                                           gpuDynInst);
+        // Check if we are waiting on Kernel End Release
+        if (w->getStatus() == Wavefront::S_RETURNING
+            && gpuDynInst->isEndOfKernel()) {
+            // for kernel end, the original request must be both kernel-type
+            // and release
+            assert(pkt->req->isKernel());
+            assert(pkt->req->isRelease());
+
+            // one wb done, decrement counter, and return whether all wbs are
+            // done for the kernel
+            bool isWbDone = dispatcher.updateWbCounter(gpuDynInst->kern_id);
+
+            // not all wbs are done for the kernel, just release pkt
+            // resources
+            if (!isWbDone) {
+                delete pkt->senderState;
+                delete pkt;
+                return true;
+            }
+
+            // all wbs are completed for the kernel, do retirement work
+            // for the workgroup
+            DPRINTF(GPUDisp, "CU%d: WF[%d][%d][wv=%d]: WG %d completed\n",
+                    computeUnit->cu_id, w->simdId, w->wfSlotId,
+                    w->wfDynId, w->wgId);
+
+            dispatcher.notifyWgCompl(w);
+            w->setStatus(Wavefront::S_STOPPED);
+        }
+
+        if (!pkt->req->isKernel()) {
+            w = computeUnit->wfList[gpuDynInst->simdId][gpuDynInst->wfSlotId];
+            DPRINTF(GPUExec, "MemSyncResp: WF[%d][%d] WV%d %s decrementing "
+                            "outstanding reqs %d => %d\n", gpuDynInst->simdId,
+                            gpuDynInst->wfSlotId, gpuDynInst->wfDynId,
+                            gpuDynInst->disassemble(), w->outstandingReqs,
+                            w->outstandingReqs - 1);
+            computeUnit->globalMemoryPipe.handleResponse(gpuDynInst);
         }
 
         delete pkt->senderState;
         delete pkt;
         return true;
-    } else if (pkt->req->isKernel() && pkt->req->isAcquire()) {
-        if (gpuDynInst->useContinuation) {
-            assert(!gpuDynInst->isNoScope());
-            gpuDynInst->execContinuation(gpuDynInst->staticInstruction(),
-                                           gpuDynInst);
+    } else if (pkt->cmd == MemCmd::WriteCompleteResp) {
+        // this is for writeComplete callback
+        // we simply get decrement write-related wait counters
+        assert(gpuDynInst);
+        Wavefront *w M5_VAR_USED =
+            computeUnit->wfList[gpuDynInst->simdId][gpuDynInst->wfSlotId];
+        assert(w);
+        DPRINTF(GPUExec, "WriteCompleteResp: WF[%d][%d] WV%d %s decrementing "
+                        "outstanding reqs %d => %d\n", gpuDynInst->simdId,
+                        gpuDynInst->wfSlotId, gpuDynInst->wfDynId,
+                        gpuDynInst->disassemble(), w->outstandingReqs,
+                        w->outstandingReqs - 1);
+        if (gpuDynInst->allLanesZero()) {
+            // ask gm pipe to decrement request counters, instead of directly
+            // performing here, to avoid asynchronous counter update and
+            // instruction retirement (which may hurt waincnt effects)
+            computeUnit->globalMemoryPipe.handleResponse(gpuDynInst);
+
+            DPRINTF(GPUMem, "CU%d: WF[%d][%d]: write totally complete\n",
+                            computeUnit->cu_id, gpuDynInst->simdId,
+                            gpuDynInst->wfSlotId);
         }
 
         delete pkt->senderState;
         delete pkt;
+
         return true;
     }
 
     EventFunctionWrapper *mem_resp_event =
-        computeUnit->memPort[index]->createMemRespEvent(pkt);
+        computeUnit->memPort[index].createMemRespEvent(pkt);
 
-    DPRINTF(GPUPort, "CU%d: WF[%d][%d]: index %d, addr %#x received!\n",
+    DPRINTF(GPUPort,
+            "CU%d: WF[%d][%d]: gpuDynInst: %d, index %d, addr %#x received!\n",
             computeUnit->cu_id, gpuDynInst->simdId, gpuDynInst->wfSlotId,
-            index, pkt->req->getPaddr());
+            gpuDynInst->seqNum(), index, pkt->req->getPaddr());
 
     computeUnit->schedule(mem_resp_event,
                           curTick() + computeUnit->resp_tick_latency);
+
     return true;
+}
+
+bool
+ComputeUnit::ScalarDataPort::recvTimingResp(PacketPtr pkt)
+{
+    assert(!pkt->req->isKernel());
+
+    // retrieve sender state
+    SenderState *sender_state = safe_cast<SenderState*>(pkt->senderState);
+    GPUDynInstPtr gpuDynInst = sender_state->_gpuDynInst;
+
+    assert(pkt->isRead() || pkt->isWrite());
+    assert(gpuDynInst->numScalarReqs > 0);
+
+    gpuDynInst->numScalarReqs--;
+
+    /**
+     * for each returned scalar request we decrement the
+     * numScalarReqs counter that is associated with this
+     * gpuDynInst, which should have been set to correspond
+     * to the number of packets sent for the memory op.
+     * once all packets return, the memory op is finished
+     * and we can push it into the response queue.
+     */
+    if (!gpuDynInst->numScalarReqs) {
+        if (gpuDynInst->isLoad() || gpuDynInst->isAtomic()) {
+                computeUnit->scalarMemoryPipe.getGMLdRespFIFO().push(
+                                gpuDynInst);
+        } else {
+                computeUnit->scalarMemoryPipe.getGMStRespFIFO().push(
+                                gpuDynInst);
+        }
+    }
+
+    delete pkt->senderState;
+    delete pkt;
+
+    return true;
+}
+
+void
+ComputeUnit::ScalarDataPort::recvReqRetry()
+{
+    for (const auto &pkt : retries) {
+        if (!sendTimingReq(pkt)) {
+            break;
+        } else {
+            retries.pop_front();
+        }
+    }
 }
 
 void
@@ -709,7 +987,6 @@ bool
 ComputeUnit::SQCPort::recvTimingResp(PacketPtr pkt)
 {
     computeUnit->fetchStage.processFetchReturn(pkt);
-
     return true;
 }
 
@@ -737,7 +1014,7 @@ ComputeUnit::SQCPort::recvReqRetry()
 }
 
 void
-ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
+ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, PortID index, PacketPtr pkt)
 {
     // There must be a way around this check to do the globalMemStart...
     Addr tmp_vaddr = pkt->req->getVaddr();
@@ -753,9 +1030,12 @@ ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
     BaseTLB::Mode TLB_mode;
     assert(pkt->isRead() || pkt->isWrite());
 
+    // only do some things if actually accessing data
+    bool isDataAccess = pkt->isWrite() || pkt->isRead();
+
     // Check write before read for atomic operations
     // since atomic operations should use BaseTLB::Write
-    if (pkt->isWrite()){
+    if (pkt->isWrite()) {
         TLB_mode = BaseTLB::Write;
     } else if (pkt->isRead()) {
         TLB_mode = BaseTLB::Read;
@@ -766,7 +1046,7 @@ ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
     tlbCycles -= curTick();
     ++tlbRequests;
 
-    int tlbPort_index = perLaneTLB ? index : 0;
+    PortID tlbPort_index = perLaneTLB ? index : 0;
 
     if (shader->timingSim) {
         if (debugSegFault) {
@@ -801,7 +1081,7 @@ ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
         pkt->senderState = translation_state;
 
         if (functionalTLB) {
-            tlbPort[tlbPort_index]->sendFunctional(pkt);
+            tlbPort[tlbPort_index].sendFunctional(pkt);
 
             // update the hitLevel distribution
             int hit_level = translation_state->hitLevel;
@@ -819,8 +1099,6 @@ ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
             assert(pkt->req->hasPaddr());
             assert(pkt->req->hasSize());
 
-            uint8_t *tmpData = pkt->getPtr<uint8_t>();
-
             // this is necessary because the GPU TLB receives packets instead
             // of requests. when the translation is complete, all relevent
             // fields in the request will be populated, but not in the packet.
@@ -828,58 +1106,61 @@ ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
             // and proper flags.
             PacketPtr oldPkt = pkt;
             pkt = new Packet(oldPkt->req, oldPkt->cmd);
+            if (isDataAccess) {
+                uint8_t *tmpData = oldPkt->getPtr<uint8_t>();
+                pkt->dataStatic(tmpData);
+            }
             delete oldPkt;
-            pkt->dataStatic(tmpData);
 
 
             // New SenderState for the memory access
-            pkt->senderState = new ComputeUnit::DataPort::SenderState(gpuDynInst,
-                                                             index, nullptr);
+            pkt->senderState =
+                new ComputeUnit::DataPort::SenderState(gpuDynInst, index,
+                    nullptr);
 
             gpuDynInst->memStatusVector[pkt->getAddr()].push_back(index);
             gpuDynInst->tlbHitLevel[index] = hit_level;
 
-
             // translation is done. Schedule the mem_req_event at the
             // appropriate cycle to send the timing memory request to ruby
             EventFunctionWrapper *mem_req_event =
-                memPort[index]->createMemReqEvent(pkt);
+                memPort[index].createMemReqEvent(pkt);
 
             DPRINTF(GPUPort, "CU%d: WF[%d][%d]: index %d, addr %#x data "
                     "scheduled\n", cu_id, gpuDynInst->simdId,
                     gpuDynInst->wfSlotId, index, pkt->req->getPaddr());
 
             schedule(mem_req_event, curTick() + req_tick_latency);
-        } else if (tlbPort[tlbPort_index]->isStalled()) {
-            assert(tlbPort[tlbPort_index]->retries.size() > 0);
+        } else if (tlbPort[tlbPort_index].isStalled()) {
+            assert(tlbPort[tlbPort_index].retries.size() > 0);
 
             DPRINTF(GPUTLB, "CU%d: WF[%d][%d]: Translation for addr %#x "
-                    "failed!\n", cu_id, gpuDynInst->simdId, gpuDynInst->wfSlotId,
-                    tmp_vaddr);
+                    "failed!\n", cu_id, gpuDynInst->simdId,
+                    gpuDynInst->wfSlotId, tmp_vaddr);
 
-            tlbPort[tlbPort_index]->retries.push_back(pkt);
-        } else if (!tlbPort[tlbPort_index]->sendTimingReq(pkt)) {
+            tlbPort[tlbPort_index].retries.push_back(pkt);
+        } else if (!tlbPort[tlbPort_index].sendTimingReq(pkt)) {
             // Stall the data port;
             // No more packet will be issued till
             // ruby indicates resources are freed by
             // a recvReqRetry() call back on this port.
-            tlbPort[tlbPort_index]->stallPort();
+            tlbPort[tlbPort_index].stallPort();
 
             DPRINTF(GPUTLB, "CU%d: WF[%d][%d]: Translation for addr %#x "
-                    "failed!\n", cu_id, gpuDynInst->simdId, gpuDynInst->wfSlotId,
-                    tmp_vaddr);
+                    "failed!\n", cu_id, gpuDynInst->simdId,
+                    gpuDynInst->wfSlotId, tmp_vaddr);
 
-            tlbPort[tlbPort_index]->retries.push_back(pkt);
+            tlbPort[tlbPort_index].retries.push_back(pkt);
         } else {
            DPRINTF(GPUTLB,
                    "CU%d: WF[%d][%d]: Translation for addr %#x sent!\n",
                    cu_id, gpuDynInst->simdId, gpuDynInst->wfSlotId, tmp_vaddr);
         }
     } else {
-        if (pkt->cmd == MemCmd::MemFenceReq) {
-            gpuDynInst->statusBitVector = VectorMask(0);
+        if (pkt->cmd == MemCmd::MemSyncReq) {
+            gpuDynInst->resetEntireStatusVector();
         } else {
-            gpuDynInst->statusBitVector &= (~(1ll << index));
+            gpuDynInst->decrementStatusVector(index);
         }
 
         // New SenderState for the memory access
@@ -889,7 +1170,7 @@ ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
         pkt->senderState = new TheISA::GpuTLB::TranslationState(TLB_mode,
                                                                 shader->gpuTc);
 
-        tlbPort[tlbPort_index]->sendFunctional(pkt);
+        tlbPort[tlbPort_index].sendFunctional(pkt);
 
         // the addr of the packet is not modified, so we need to create a new
         // packet, or otherwise the memory access will have the old virtual
@@ -899,8 +1180,9 @@ ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
         new_pkt->dataStatic(pkt->getPtr<uint8_t>());
 
         // Translation is done. It is safe to send the packet to memory.
-        memPort[0]->sendFunctional(new_pkt);
+        memPort[0].sendFunctional(new_pkt);
 
+        DPRINTF(GPUMem, "Functional sendRequest\n");
         DPRINTF(GPUMem, "CU%d: WF[%d][%d]: index %d: addr %#x\n", cu_id,
                 gpuDynInst->simdId, gpuDynInst->wfSlotId, index,
                 new_pkt->req->getPaddr());
@@ -917,56 +1199,107 @@ ComputeUnit::sendRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
 }
 
 void
-ComputeUnit::sendSyncRequest(GPUDynInstPtr gpuDynInst, int index, PacketPtr pkt)
+ComputeUnit::sendScalarRequest(GPUDynInstPtr gpuDynInst, PacketPtr pkt)
 {
-    EventFunctionWrapper *mem_req_event =
-        memPort[index]->createMemReqEvent(pkt);
+    assert(pkt->isWrite() || pkt->isRead());
 
+    BaseTLB::Mode tlb_mode = pkt->isRead() ? BaseTLB::Read : BaseTLB::Write;
 
-    // New SenderState for the memory access
-    pkt->senderState = new ComputeUnit::DataPort::SenderState(gpuDynInst, index,
-                                                              nullptr);
+    pkt->senderState =
+        new ComputeUnit::ScalarDTLBPort::SenderState(gpuDynInst);
 
-    DPRINTF(GPUPort, "CU%d: WF[%d][%d]: index %d, addr %#x sync scheduled\n",
-            cu_id, gpuDynInst->simdId, gpuDynInst->wfSlotId, index,
-            pkt->req->getPaddr());
+    pkt->senderState =
+        new TheISA::GpuTLB::TranslationState(tlb_mode, shader->gpuTc, false,
+                                             pkt->senderState);
 
-    schedule(mem_req_event, curTick() + req_tick_latency);
+    if (scalarDTLBPort.isStalled()) {
+        assert(scalarDTLBPort.retries.size());
+        scalarDTLBPort.retries.push_back(pkt);
+    } else if (!scalarDTLBPort.sendTimingReq(pkt)) {
+        scalarDTLBPort.stallPort();
+        scalarDTLBPort.retries.push_back(pkt);
+    } else {
+        DPRINTF(GPUTLB, "sent scalar %s translation request for addr %#x\n",
+                tlb_mode == BaseTLB::Read ? "read" : "write",
+                pkt->req->getVaddr());
+    }
 }
 
 void
-ComputeUnit::injectGlobalMemFence(GPUDynInstPtr gpuDynInst, bool kernelLaunch,
+ComputeUnit::injectGlobalMemFence(GPUDynInstPtr gpuDynInst,
+                                  bool kernelMemSync,
                                   RequestPtr req)
 {
-    assert(gpuDynInst->isGlobalSeg());
+    assert(gpuDynInst->isGlobalSeg() ||
+           gpuDynInst->executedAs() == Enums::SC_GLOBAL);
 
     if (!req) {
         req = std::make_shared<Request>(
-            0, 0, 0, masterId(), 0, gpuDynInst->wfDynId);
+            0, 0, 0, requestorId(), 0, gpuDynInst->wfDynId);
     }
+
+    // all mem sync requests have Paddr == 0
     req->setPaddr(0);
-    if (kernelLaunch) {
-        req->setFlags(Request::KERNEL);
+
+    PacketPtr pkt = nullptr;
+
+    if (kernelMemSync) {
+        if (gpuDynInst->isKernelLaunch()) {
+            req->setCacheCoherenceFlags(Request::ACQUIRE);
+            req->setReqInstSeqNum(gpuDynInst->seqNum());
+            req->setFlags(Request::KERNEL);
+            pkt = new Packet(req, MemCmd::MemSyncReq);
+            pkt->pushSenderState(
+               new ComputeUnit::DataPort::SenderState(gpuDynInst, 0, nullptr));
+
+            EventFunctionWrapper *mem_req_event =
+              memPort[0].createMemReqEvent(pkt);
+
+            DPRINTF(GPUPort, "CU%d: WF[%d][%d]: index %d, addr %#x scheduling "
+                    "an acquire\n", cu_id, gpuDynInst->simdId,
+                    gpuDynInst->wfSlotId, 0, pkt->req->getPaddr());
+
+            schedule(mem_req_event, curTick() + req_tick_latency);
+        } else {
+          // kernel end release must be enabled
+          assert(shader->impl_kern_end_rel);
+          assert(gpuDynInst->isEndOfKernel());
+
+          req->setCacheCoherenceFlags(Request::WB_L2);
+          req->setReqInstSeqNum(gpuDynInst->seqNum());
+          req->setFlags(Request::KERNEL);
+          pkt = new Packet(req, MemCmd::MemSyncReq);
+          pkt->pushSenderState(
+             new ComputeUnit::DataPort::SenderState(gpuDynInst, 0, nullptr));
+
+          EventFunctionWrapper *mem_req_event =
+            memPort[0].createMemReqEvent(pkt);
+
+          DPRINTF(GPUPort, "CU%d: WF[%d][%d]: index %d, addr %#x scheduling "
+                  "a release\n", cu_id, gpuDynInst->simdId,
+                  gpuDynInst->wfSlotId, 0, pkt->req->getPaddr());
+
+          schedule(mem_req_event, curTick() + req_tick_latency);
+        }
+    } else {
+        gpuDynInst->setRequestFlags(req);
+
+        req->setReqInstSeqNum(gpuDynInst->seqNum());
+
+        pkt = new Packet(req, MemCmd::MemSyncReq);
+        pkt->pushSenderState(
+            new ComputeUnit::DataPort::SenderState(gpuDynInst, 0, nullptr));
+
+        EventFunctionWrapper *mem_req_event =
+          memPort[0].createMemReqEvent(pkt);
+
+        DPRINTF(GPUPort,
+                "CU%d: WF[%d][%d]: index %d, addr %#x sync scheduled\n",
+                cu_id, gpuDynInst->simdId, gpuDynInst->wfSlotId, 0,
+                pkt->req->getPaddr());
+
+        schedule(mem_req_event, curTick() + req_tick_latency);
     }
-
-    // for non-kernel MemFence operations, memorder flags are set depending
-    // on which type of request is currently being sent, so this
-    // should be set by the caller (e.g. if an inst has acq-rel
-    // semantics, it will send one acquire req an one release req)
-    gpuDynInst->setRequestFlags(req, kernelLaunch);
-
-    // a mem fence must correspond to an acquire/release request
-    assert(req->isAcquire() || req->isRelease());
-
-    // create packet
-    PacketPtr pkt = new Packet(req, MemCmd::MemFenceReq);
-
-    // set packet's sender state
-    pkt->senderState =
-        new ComputeUnit::DataPort::SenderState(gpuDynInst, 0, nullptr);
-
-    // send the packet
-    sendSyncRequest(gpuDynInst, 0, pkt);
 }
 
 void
@@ -982,73 +1315,64 @@ ComputeUnit::DataPort::processMemRespEvent(PacketPtr pkt)
 
     DPRINTF(GPUPort, "CU%d: WF[%d][%d]: Response for addr %#x, index %d\n",
             compute_unit->cu_id, gpuDynInst->simdId, gpuDynInst->wfSlotId,
-            pkt->req->getPaddr(), index);
+            pkt->req->getPaddr(), id);
 
     Addr paddr = pkt->req->getPaddr();
 
-    if (pkt->cmd != MemCmd::MemFenceResp) {
-        int index = gpuDynInst->memStatusVector[paddr].back();
+    // mem sync resp and write-complete callback must be handled already in
+    // DataPort::recvTimingResp
+    assert(pkt->cmd != MemCmd::MemSyncResp);
+    assert(pkt->cmd != MemCmd::WriteCompleteResp);
 
-        DPRINTF(GPUMem, "Response for addr %#x, index %d\n",
-                pkt->req->getPaddr(), index);
+    // this is for read, write and atomic
+    int index = gpuDynInst->memStatusVector[paddr].back();
 
-        gpuDynInst->memStatusVector[paddr].pop_back();
-        gpuDynInst->pAddr = pkt->req->getPaddr();
+    DPRINTF(GPUMem, "Response for addr %#x, index %d\n",
+            pkt->req->getPaddr(), id);
 
-        if (pkt->isRead() || pkt->isWrite()) {
+    gpuDynInst->memStatusVector[paddr].pop_back();
+    gpuDynInst->pAddr = pkt->req->getPaddr();
 
-            if (gpuDynInst->n_reg <= MAX_REGS_FOR_NON_VEC_MEM_INST) {
-                gpuDynInst->statusBitVector &= (~(1ULL << index));
-            } else {
-                assert(gpuDynInst->statusVector[index] > 0);
-                gpuDynInst->statusVector[index]--;
+    gpuDynInst->decrementStatusVector(index);
+    DPRINTF(GPUMem, "bitvector is now %s\n", gpuDynInst->printStatusVector());
 
-                if (!gpuDynInst->statusVector[index])
-                    gpuDynInst->statusBitVector &= (~(1ULL << index));
-            }
+    if (gpuDynInst->allLanesZero()) {
+        auto iter = gpuDynInst->memStatusVector.begin();
+        auto end = gpuDynInst->memStatusVector.end();
 
-            DPRINTF(GPUMem, "bitvector is now %#x\n",
-                    gpuDynInst->statusBitVector);
+        while (iter != end) {
+            assert(iter->second.empty());
+            ++iter;
+        }
 
-            if (gpuDynInst->statusBitVector == VectorMask(0)) {
-                auto iter = gpuDynInst->memStatusVector.begin();
-                auto end = gpuDynInst->memStatusVector.end();
+        // Calculate the difference between the arrival of the first cache
+        // block and the last cache block to arrive if we have the time
+        // for the first cache block.
+        if (compute_unit->headTailMap.count(gpuDynInst)) {
+            Tick headTick = compute_unit->headTailMap.at(gpuDynInst);
+            compute_unit->headTailLatency.sample(curTick() - headTick);
+            compute_unit->headTailMap.erase(gpuDynInst);
+        }
 
-                while (iter != end) {
-                    assert(iter->second.empty());
-                    ++iter;
-                }
+        gpuDynInst->memStatusVector.clear();
 
-                gpuDynInst->memStatusVector.clear();
+        // note: only handle read response here; for write, the response
+        // is separately handled when writeComplete callback is received
+        if (pkt->isRead()) {
+            gpuDynInst->
+                profileRoundTripTime(curTick(), InstMemoryHop::GMEnqueue);
+            compute_unit->globalMemoryPipe.handleResponse(gpuDynInst);
 
-                if (gpuDynInst->n_reg > MAX_REGS_FOR_NON_VEC_MEM_INST)
-                    gpuDynInst->statusVector.clear();
-
-                compute_unit->globalMemoryPipe.handleResponse(gpuDynInst);
-
-                DPRINTF(GPUMem, "CU%d: WF[%d][%d]: packet totally complete\n",
-                        compute_unit->cu_id, gpuDynInst->simdId,
-                        gpuDynInst->wfSlotId);
-
-                // after clearing the status vectors,
-                // see if there is a continuation to perform
-                // the continuation may generate more work for
-                // this memory request
-                if (gpuDynInst->useContinuation) {
-                    assert(!gpuDynInst->isNoScope());
-                    gpuDynInst->execContinuation(
-                        gpuDynInst->staticInstruction(),
-                        gpuDynInst);
-                }
-            }
+            DPRINTF(GPUMem, "CU%d: WF[%d][%d]: packet totally complete\n",
+                    compute_unit->cu_id, gpuDynInst->simdId,
+                    gpuDynInst->wfSlotId);
         }
     } else {
-        gpuDynInst->statusBitVector = VectorMask(0);
-
-        if (gpuDynInst->useContinuation) {
-            assert(!gpuDynInst->isNoScope());
-            gpuDynInst->execContinuation(gpuDynInst->staticInstruction(),
-                                         gpuDynInst);
+        if (pkt->isRead()) {
+            if (!compute_unit->headTailMap.count(gpuDynInst)) {
+                compute_unit->headTailMap
+                    .insert(std::make_pair(gpuDynInst, curTick()));
+            }
         }
     }
 
@@ -1108,7 +1432,7 @@ ComputeUnit::DTLBPort::recvTimingResp(PacketPtr pkt)
         safe_cast<DTLBPort::SenderState*>(pkt->senderState);
 
     GPUDynInstPtr gpuDynInst = sender_state->_gpuDynInst;
-    int mp_index = sender_state->portIndex;
+    PortID mp_index = sender_state->portIndex;
     Addr vaddr = pkt->req->getVaddr();
     gpuDynInst->memStatusVector[line].push_back(mp_index);
     gpuDynInst->tlbHitLevel[mp_index] = hit_level;
@@ -1176,7 +1500,7 @@ ComputeUnit::DTLBPort::recvTimingResp(PacketPtr pkt)
             RequestPtr prefetch_req = std::make_shared<Request>(
                 vaddr + stride * pf * TheISA::PageBytes,
                 sizeof(uint8_t), 0,
-                computeUnit->masterId(),
+                computeUnit->requestorId(),
                 0, 0, nullptr);
 
             PacketPtr prefetch_pkt = new Packet(prefetch_req, requestCmd);
@@ -1186,8 +1510,7 @@ ComputeUnit::DTLBPort::recvTimingResp(PacketPtr pkt)
             // Because it's atomic operation, only need TLB translation state
             prefetch_pkt->senderState =
                 new TheISA::GpuTLB::TranslationState(TLB_mode,
-                                                     computeUnit->shader->gpuTc,
-                                                     true);
+                    computeUnit->shader->gpuTc, true);
 
             // Currently prefetches are zero-latency, hence the sendFunctional
             sendFunctional(prefetch_pkt);
@@ -1205,7 +1528,7 @@ ComputeUnit::DTLBPort::recvTimingResp(PacketPtr pkt)
     }
 
     // First we must convert the response cmd back to a request cmd so that
-    // the request can be sent through the cu's master port
+    // the request can be sent through the cu's request port
     PacketPtr new_pkt = new Packet(pkt->req, requestCmd);
     new_pkt->dataStatic(pkt->getPtr<uint8_t>());
     delete pkt->senderState;
@@ -1219,7 +1542,7 @@ ComputeUnit::DTLBPort::recvTimingResp(PacketPtr pkt)
     // translation is done. Schedule the mem_req_event at the appropriate
     // cycle to send the timing memory request to ruby
     EventFunctionWrapper *mem_req_event =
-        computeUnit->memPort[mp_index]->createMemReqEvent(new_pkt);
+        computeUnit->memPort[mp_index].createMemReqEvent(new_pkt);
 
     DPRINTF(GPUPort, "CU%d: WF[%d][%d]: index %d, addr %#x data scheduled\n",
             computeUnit->cu_id, gpuDynInst->simdId,
@@ -1259,14 +1582,42 @@ ComputeUnit::DataPort::processMemReqEvent(PacketPtr pkt)
 
         DPRINTF(GPUPort,
                 "CU%d: WF[%d][%d]: index %d, addr %#x data req failed!\n",
-                compute_unit->cu_id, gpuDynInst->simdId,
-                gpuDynInst->wfSlotId, index,
-                pkt->req->getPaddr());
+                compute_unit->cu_id, gpuDynInst->simdId, gpuDynInst->wfSlotId,
+                id, pkt->req->getPaddr());
     } else {
         DPRINTF(GPUPort,
-                "CU%d: WF[%d][%d]: index %d, addr %#x data req sent!\n",
+                "CU%d: WF[%d][%d]: gpuDynInst: %d, index %d, addr %#x data "
+                "req sent!\n", compute_unit->cu_id, gpuDynInst->simdId,
+                gpuDynInst->wfSlotId, gpuDynInst->seqNum(), id,
+                pkt->req->getPaddr());
+    }
+}
+
+const char*
+ComputeUnit::ScalarDataPort::MemReqEvent::description() const
+{
+    return "ComputeUnit scalar memory request event";
+}
+
+void
+ComputeUnit::ScalarDataPort::MemReqEvent::process()
+{
+    SenderState *sender_state = safe_cast<SenderState*>(pkt->senderState);
+    GPUDynInstPtr gpuDynInst = sender_state->_gpuDynInst;
+    ComputeUnit *compute_unit M5_VAR_USED = scalarDataPort.computeUnit;
+
+    if (!(scalarDataPort.sendTimingReq(pkt))) {
+        scalarDataPort.retries.push_back(pkt);
+
+        DPRINTF(GPUPort,
+                "CU%d: WF[%d][%d]: addr %#x data req failed!\n",
                 compute_unit->cu_id, gpuDynInst->simdId,
-                gpuDynInst->wfSlotId, index,
+                gpuDynInst->wfSlotId, pkt->req->getPaddr());
+    } else {
+        DPRINTF(GPUPort,
+                "CU%d: WF[%d][%d]: gpuDynInst: %d, addr %#x data "
+                "req sent!\n", compute_unit->cu_id, gpuDynInst->simdId,
+                gpuDynInst->wfSlotId, gpuDynInst->seqNum(),
                 pkt->req->getPaddr());
     }
 }
@@ -1309,6 +1660,66 @@ ComputeUnit::DTLBPort::recvReqRetry()
 }
 
 bool
+ComputeUnit::ScalarDTLBPort::recvTimingResp(PacketPtr pkt)
+{
+    assert(pkt->senderState);
+
+    TheISA::GpuTLB::TranslationState *translation_state =
+        safe_cast<TheISA::GpuTLB::TranslationState*>(pkt->senderState);
+
+    // Page faults are not allowed
+    fatal_if(!translation_state->tlbEntry,
+            "Translation of vaddr %#x failed\n", pkt->req->getVaddr());
+
+    delete translation_state->tlbEntry;
+    assert(!translation_state->ports.size());
+
+    pkt->senderState = translation_state->saved;
+    delete translation_state;
+
+    ScalarDTLBPort::SenderState *sender_state =
+        safe_cast<ScalarDTLBPort::SenderState*>(pkt->senderState);
+
+    GPUDynInstPtr gpuDynInst = sender_state->_gpuDynInst;
+    delete pkt->senderState;
+
+    Wavefront *w M5_VAR_USED = gpuDynInst->wavefront();
+
+    DPRINTF(GPUTLB, "CU%d: WF[%d][%d][wv=%d]: scalar DTLB port received "
+        "translation: PA %#x -> %#x\n", computeUnit->cu_id, w->simdId,
+        w->wfSlotId, w->kernId, pkt->req->getVaddr(), pkt->req->getPaddr());
+
+    MemCmd mem_cmd;
+
+    if (pkt->cmd == MemCmd::ReadResp) {
+        mem_cmd = MemCmd::ReadReq;
+    } else if (pkt->cmd == MemCmd::WriteResp) {
+        mem_cmd = MemCmd::WriteReq;
+    } else {
+      fatal("Scalar DTLB receieved unexpected MemCmd response %s\n",
+            pkt->cmd.toString());
+    }
+
+    PacketPtr req_pkt = new Packet(pkt->req, mem_cmd);
+    req_pkt->dataStatic(pkt->getPtr<uint8_t>());
+    delete pkt;
+
+    req_pkt->senderState =
+        new ComputeUnit::ScalarDataPort::SenderState(gpuDynInst);
+
+    if (!computeUnit->scalarDataPort.sendTimingReq(req_pkt)) {
+        computeUnit->scalarDataPort.retries.push_back(req_pkt);
+        DPRINTF(GPUMem, "send scalar req failed for: %s\n",
+                gpuDynInst->disassemble());
+    } else {
+        DPRINTF(GPUMem, "send scalar req for: %s\n",
+                gpuDynInst->disassemble());
+    }
+
+    return true;
+}
+
+bool
 ComputeUnit::ITLBPort::recvTimingResp(PacketPtr pkt)
 {
     Addr line M5_VAR_USED = pkt->req->getPaddr();
@@ -1318,8 +1729,8 @@ ComputeUnit::ITLBPort::recvTimingResp(PacketPtr pkt)
     assert(pkt->senderState);
 
     // pop off the TLB translation state
-    TheISA::GpuTLB::TranslationState *translation_state =
-                 safe_cast<TheISA::GpuTLB::TranslationState*>(pkt->senderState);
+    TheISA::GpuTLB::TranslationState *translation_state
+        = safe_cast<TheISA::GpuTLB::TranslationState*>(pkt->senderState);
 
     bool success = translation_state->tlbEntry != nullptr;
     delete translation_state->tlbEntry;
@@ -1338,7 +1749,7 @@ ComputeUnit::ITLBPort::recvTimingResp(PacketPtr pkt)
     if (success) {
         // pkt is reused in fetch(), don't delete it here.  However, we must
         // reset the command to be a request so that it can be sent through
-        // the cu's master port
+        // the cu's request port
         assert(pkt->cmd == MemCmd::ReadResp);
         pkt->cmd = MemCmd::ReadReq;
 
@@ -1504,6 +1915,152 @@ ComputeUnit::regStats()
     scalarMemWritesPerWF = scalarMemWrites / completedWfs;
     scalarMemReadsPerWF = scalarMemReads / completedWfs;
 
+    vectorMemReadsPerKiloInst
+        .name(name() + ".vector_mem_reads_per_kilo_inst")
+        .desc("Number of vector mem reads per kilo-instruction")
+        ;
+    vectorMemReadsPerKiloInst = (vectorMemReads / numInstrExecuted) * 1000;
+    vectorMemWritesPerKiloInst
+        .name(name() + ".vector_mem_writes_per_kilo_inst")
+        .desc("Number of vector mem writes per kilo-instruction")
+        ;
+    vectorMemWritesPerKiloInst = (vectorMemWrites / numInstrExecuted) * 1000;
+    vectorMemInstsPerKiloInst
+        .name(name() + ".vector_mem_insts_per_kilo_inst")
+        .desc("Number of vector mem insts per kilo-instruction")
+        ;
+    vectorMemInstsPerKiloInst =
+        ((vectorMemReads + vectorMemWrites) / numInstrExecuted) * 1000;
+    scalarMemReadsPerKiloInst
+        .name(name() + ".scalar_mem_reads_per_kilo_inst")
+        .desc("Number of scalar mem reads per kilo-instruction")
+    ;
+    scalarMemReadsPerKiloInst = (scalarMemReads / numInstrExecuted) * 1000;
+    scalarMemWritesPerKiloInst
+        .name(name() + ".scalar_mem_writes_per_kilo_inst")
+        .desc("Number of scalar mem writes per kilo-instruction")
+    ;
+    scalarMemWritesPerKiloInst = (scalarMemWrites / numInstrExecuted) * 1000;
+    scalarMemInstsPerKiloInst
+        .name(name() + ".scalar_mem_insts_per_kilo_inst")
+        .desc("Number of scalar mem insts per kilo-instruction")
+        ;
+    scalarMemInstsPerKiloInst =
+        ((scalarMemReads + scalarMemWrites) / numInstrExecuted) * 1000;
+
+    instCyclesVMemPerSimd
+       .init(numVectorALUs)
+       .name(name() + ".inst_cycles_vector_memory")
+       .desc("Number of cycles to send address, command, data from VRF to "
+             "vector memory unit, per SIMD")
+       ;
+
+    instCyclesScMemPerSimd
+       .init(numVectorALUs)
+       .name(name() + ".inst_cycles_scalar_memory")
+       .desc("Number of cycles to send address, command, data from SRF to "
+             "scalar memory unit, per SIMD")
+       ;
+
+    instCyclesLdsPerSimd
+       .init(numVectorALUs)
+       .name(name() + ".inst_cycles_lds")
+       .desc("Number of cycles to send address, command, data from VRF to "
+             "LDS unit, per SIMD")
+       ;
+
+    globalReads
+        .name(name() + ".global_mem_reads")
+        .desc("Number of reads to the global segment")
+    ;
+    globalWrites
+        .name(name() + ".global_mem_writes")
+        .desc("Number of writes to the global segment")
+    ;
+    globalMemInsts
+        .name(name() + ".global_mem_insts")
+        .desc("Number of memory instructions sent to the global segment")
+    ;
+    globalMemInsts = globalReads + globalWrites;
+    argReads
+        .name(name() + ".arg_reads")
+        .desc("Number of reads to the arg segment")
+    ;
+    argWrites
+        .name(name() + ".arg_writes")
+        .desc("NUmber of writes to the arg segment")
+    ;
+    argMemInsts
+        .name(name() + ".arg_mem_insts")
+        .desc("Number of memory instructions sent to the arg segment")
+    ;
+    argMemInsts = argReads + argWrites;
+    spillReads
+        .name(name() + ".spill_reads")
+        .desc("Number of reads to the spill segment")
+    ;
+    spillWrites
+        .name(name() + ".spill_writes")
+        .desc("Number of writes to the spill segment")
+    ;
+    spillMemInsts
+        .name(name() + ".spill_mem_insts")
+        .desc("Number of memory instructions sent to the spill segment")
+    ;
+    spillMemInsts = spillReads + spillWrites;
+    groupReads
+        .name(name() + ".group_reads")
+        .desc("Number of reads to the group segment")
+    ;
+    groupWrites
+        .name(name() + ".group_writes")
+        .desc("Number of writes to the group segment")
+    ;
+    groupMemInsts
+        .name(name() + ".group_mem_insts")
+        .desc("Number of memory instructions sent to the group segment")
+    ;
+    groupMemInsts = groupReads + groupWrites;
+    privReads
+        .name(name() + ".private_reads")
+        .desc("Number of reads to the private segment")
+    ;
+    privWrites
+        .name(name() + ".private_writes")
+        .desc("Number of writes to the private segment")
+    ;
+    privMemInsts
+        .name(name() + ".private_mem_insts")
+        .desc("Number of memory instructions sent to the private segment")
+    ;
+    privMemInsts = privReads + privWrites;
+    readonlyReads
+        .name(name() + ".readonly_reads")
+        .desc("Number of reads to the readonly segment")
+    ;
+    readonlyWrites
+        .name(name() + ".readonly_writes")
+        .desc("Number of memory instructions sent to the readonly segment")
+    ;
+    readonlyMemInsts
+        .name(name() + ".readonly_mem_insts")
+        .desc("Number of memory instructions sent to the readonly segment")
+    ;
+    readonlyMemInsts = readonlyReads + readonlyWrites;
+    kernargReads
+        .name(name() + ".kernarg_reads")
+        .desc("Number of reads sent to the kernarg segment")
+    ;
+    kernargWrites
+        .name(name() + ".kernarg_writes")
+        .desc("Number of memory instructions sent to the kernarg segment")
+    ;
+    kernargMemInsts
+        .name(name() + ".kernarg_mem_insts")
+        .desc("Number of memory instructions sent to the kernarg segment")
+    ;
+    kernargMemInsts = kernargReads + kernargWrites;
+
     tlbCycles
         .name(name() + ".tlb_cycles")
         .desc("total number of cycles for all uncoalesced requests")
@@ -1590,6 +2147,71 @@ ComputeUnit::regStats()
         .desc("number of vec ops executed (e.g. WF size/inst)")
         ;
 
+    numVecOpsExecutedF16
+        .name(name() + ".num_vec_ops_f16_executed")
+        .desc("number of f16 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedF32
+        .name(name() + ".num_vec_ops_f32_executed")
+        .desc("number of f32 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedF64
+        .name(name() + ".num_vec_ops_f64_executed")
+        .desc("number of f64 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedFMA16
+        .name(name() + ".num_vec_ops_fma16_executed")
+        .desc("number of fma16 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedFMA32
+        .name(name() + ".num_vec_ops_fma32_executed")
+        .desc("number of fma32 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedFMA64
+        .name(name() + ".num_vec_ops_fma64_executed")
+        .desc("number of fma64 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedMAD16
+        .name(name() + ".num_vec_ops_mad16_executed")
+        .desc("number of mad16 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedMAD32
+        .name(name() + ".num_vec_ops_mad32_executed")
+        .desc("number of mad32 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedMAD64
+        .name(name() + ".num_vec_ops_mad64_executed")
+        .desc("number of mad64 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedMAC16
+        .name(name() + ".num_vec_ops_mac16_executed")
+        .desc("number of mac16 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedMAC32
+        .name(name() + ".num_vec_ops_mac32_executed")
+        .desc("number of mac32 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedMAC64
+        .name(name() + ".num_vec_ops_mac64_executed")
+        .desc("number of mac64 vec ops executed (e.g. WF size/inst)")
+        ;
+
+    numVecOpsExecutedTwoOpFP
+        .name(name() + ".num_vec_ops_two_op_fp_executed")
+        .desc("number of two op FP vec ops executed (e.g. WF size/inst)")
+        ;
+
     totalCycles
         .name(name() + ".num_total_cycles")
         .desc("number of cycles the CU ran for")
@@ -1605,9 +2227,29 @@ ComputeUnit::regStats()
         .desc("Vector Operations per cycle (this CU only)")
         ;
 
+    vpc_f16
+        .name(name() + ".vpc_f16")
+        .desc("F16 Vector Operations per cycle (this CU only)")
+        ;
+
+    vpc_f32
+        .name(name() + ".vpc_f32")
+        .desc("F32 Vector Operations per cycle (this CU only)")
+        ;
+
+    vpc_f64
+        .name(name() + ".vpc_f64")
+        .desc("F64 Vector Operations per cycle (this CU only)")
+        ;
+
     numALUInstsExecuted
         .name(name() + ".num_alu_insts_executed")
         .desc("Number of dynamic non-GM memory insts executed")
+        ;
+
+    wgBlockedDueBarrierAllocation
+        .name(name() + ".wg_blocked_due_barrier_alloc")
+        .desc("WG dispatch was blocked due to lack of barrier resources")
         ;
 
     wgBlockedDueLdsAllocation
@@ -1617,15 +2259,30 @@ ComputeUnit::regStats()
 
     ipc = numInstrExecuted / totalCycles;
     vpc = numVecOpsExecuted / totalCycles;
+    vpc_f16 = numVecOpsExecutedF16 / totalCycles;
+    vpc_f32 = numVecOpsExecutedF32 / totalCycles;
+    vpc_f64 = numVecOpsExecutedF64 / totalCycles;
 
     numTimesWgBlockedDueVgprAlloc
         .name(name() + ".times_wg_blocked_due_vgpr_alloc")
-        .desc("Number of times WGs are blocked due to VGPR allocation per SIMD")
+        .desc("Number of times WGs are blocked due to VGPR allocation per "
+              "SIMD")
+        ;
+
+    numTimesWgBlockedDueSgprAlloc
+        .name(name() + ".times_wg_blocked_due_sgpr_alloc")
+        .desc("Number of times WGs are blocked due to SGPR allocation per "
+              "SIMD")
         ;
 
     dynamicGMemInstrCnt
         .name(name() + ".global_mem_instr_cnt")
-        .desc("dynamic global memory instructions count")
+        .desc("dynamic non-flat global memory instruction count")
+        ;
+
+    dynamicFlatMemInstrCnt
+        .name(name() + ".flat_global_mem_instr_cnt")
+        .desc("dynamic flat global memory instruction count")
         ;
 
     dynamicLMemInstrCnt
@@ -1641,6 +2298,11 @@ ComputeUnit::regStats()
         .desc("number of completed wavefronts")
         ;
 
+    completedWGs
+        .name(name() + ".num_completed_wgs")
+        .desc("number of completed workgroups")
+        ;
+
     numCASOps
         .name(name() + ".num_CAS_ops")
         .desc("number of compare and swap operations")
@@ -1651,15 +2313,37 @@ ComputeUnit::regStats()
         .desc("number of compare and swap operations that failed")
         ;
 
+    headTailLatency
+        .init(0, 1000000, 10000)
+        .name(name() + ".head_tail_latency")
+        .desc("ticks between first and last cache block arrival at coalescer")
+        .flags(Stats::pdf | Stats::oneline)
+        ;
+
+    waveLevelParallelism
+        .init(0, shader->n_wf * numVectorALUs, 1)
+        .name(name() + ".wlp")
+        .desc("wave level parallelism: count of active waves at wave launch")
+        ;
+
+    instInterleave
+        .init(numVectorALUs, 0, 20, 1)
+        .name(name() + ".interleaving")
+        .desc("Measure of instruction interleaving per SIMD")
+        ;
+
     // register stats of pipeline stages
     fetchStage.regStats();
     scoreboardCheckStage.regStats();
     scheduleStage.regStats();
     execStage.regStats();
 
-    // register stats of memory pipeline
+    // register stats of memory pipelines
     globalMemoryPipe.regStats();
     localMemoryPipe.regStats();
+    scalarMemoryPipe.regStats();
+
+    registerManager->regStats();
 }
 
 void
@@ -1676,6 +2360,10 @@ ComputeUnit::updateInstStats(GPUDynInstPtr gpuDynInst)
         }
     } else {
         if (gpuDynInst->isALU()) {
+            shader->total_valu_insts++;
+            if (shader->total_valu_insts == shader->max_valu_insts) {
+                exitSimLoop("max vALU insts");
+            }
             vALUInsts++;
             instCyclesVALU++;
             threadCyclesVALU += gpuDynInst->wavefront()->execMask().count();
@@ -1692,6 +2380,74 @@ ComputeUnit::updateInstStats(GPUDynInstPtr gpuDynInst)
         } else if (gpuDynInst->isStore()) {
             vectorMemWrites++;
         }
+
+        if (gpuDynInst->isLoad()) {
+            switch (gpuDynInst->executedAs()) {
+              case Enums::SC_SPILL:
+                spillReads++;
+                break;
+              case Enums::SC_GLOBAL:
+                globalReads++;
+                break;
+              case Enums::SC_GROUP:
+                groupReads++;
+                break;
+              case Enums::SC_PRIVATE:
+                privReads++;
+                break;
+              case Enums::SC_READONLY:
+                readonlyReads++;
+                break;
+              case Enums::SC_KERNARG:
+                kernargReads++;
+                break;
+              case Enums::SC_ARG:
+                argReads++;
+                break;
+              case Enums::SC_NONE:
+                /**
+                 * this case can occur for flat mem insts
+                 * who execute with EXEC = 0
+                 */
+                break;
+              default:
+                fatal("%s has no valid segment\n", gpuDynInst->disassemble());
+                break;
+            }
+        } else if (gpuDynInst->isStore()) {
+            switch (gpuDynInst->executedAs()) {
+              case Enums::SC_SPILL:
+                spillWrites++;
+                break;
+              case Enums::SC_GLOBAL:
+                globalWrites++;
+                break;
+              case Enums::SC_GROUP:
+                groupWrites++;
+                break;
+              case Enums::SC_PRIVATE:
+                privWrites++;
+                break;
+              case Enums::SC_READONLY:
+                readonlyWrites++;
+                break;
+              case Enums::SC_KERNARG:
+                kernargWrites++;
+                break;
+              case Enums::SC_ARG:
+                argWrites++;
+                break;
+              case Enums::SC_NONE:
+                /**
+                 * this case can occur for flat mem insts
+                 * who execute with EXEC = 0
+                 */
+                break;
+              default:
+                fatal("%s has no valid segment\n", gpuDynInst->disassemble());
+                break;
+            }
+        }
     }
 }
 
@@ -1707,46 +2463,46 @@ ComputeUnit::updatePageDivergenceDist(Addr addr)
 }
 
 void
-ComputeUnit::CUExitCallback::process()
+ComputeUnit::exitCallback()
 {
-    if (computeUnit->countPages) {
-        std::ostream *page_stat_file =
-            simout.create(computeUnit->name().c_str())->stream();
+    if (countPages) {
+        std::ostream *page_stat_file = simout.create(name().c_str())->stream();
 
         *page_stat_file << "page, wavefront accesses, workitem accesses" <<
             std::endl;
 
-        for (auto iter : computeUnit->pageAccesses) {
+        for (auto iter : pageAccesses) {
             *page_stat_file << std::hex << iter.first << ",";
             *page_stat_file << std::dec << iter.second.first << ",";
             *page_stat_file << std::dec << iter.second.second << std::endl;
         }
     }
- }
+}
 
 bool
 ComputeUnit::isDone() const
 {
-    for (int i = 0; i < numSIMDs; ++i) {
-        if (!isSimdDone(i)) {
+    for (int i = 0; i < numVectorALUs; ++i) {
+        if (!isVectorAluIdle(i)) {
             return false;
         }
     }
 
-    bool glbMemBusRdy = true;
-    for (int j = 0; j < numGlbMemUnits; ++j) {
-        glbMemBusRdy &= vrfToGlobalMemPipeBus[j].rdy();
+    // TODO: FIXME if more than 1 of any memory pipe supported
+    if (!srfToScalarMemPipeBus.rdy()) {
+        return false;
     }
-    bool locMemBusRdy = true;
-    for (int j = 0; j < numLocMemUnits; ++j) {
-        locMemBusRdy &= vrfToLocalMemPipeBus[j].rdy();
+    if (!vrfToGlobalMemPipeBus.rdy()) {
+        return false;
+    }
+    if (!vrfToLocalMemPipeBus.rdy()) {
+        return false;
     }
 
-    if (!globalMemoryPipe.isGMLdRespFIFOWrRdy() ||
-        !globalMemoryPipe.isGMStRespFIFOWrRdy() ||
-        !globalMemoryPipe.isGMReqFIFOWrRdy() || !localMemoryPipe.isLMReqFIFOWrRdy()
+    if (!globalMemoryPipe.isGMReqFIFOWrRdy()
+        || !localMemoryPipe.isLMReqFIFOWrRdy()
         || !localMemoryPipe.isLMRespFIFOWrRdy() || !locMemToVrfBus.rdy() ||
-        !glbMemToVrfBus.rdy() || !locMemBusRdy || !glbMemBusRdy) {
+        !glbMemToVrfBus.rdy() || !scalarMemToSrfBus.rdy()) {
         return false;
     }
 
@@ -1754,30 +2510,19 @@ ComputeUnit::isDone() const
 }
 
 int32_t
-ComputeUnit::getRefCounter(const uint32_t dispatchId, const uint32_t wgId) const
+ComputeUnit::getRefCounter(const uint32_t dispatchId,
+    const uint32_t wgId) const
 {
     return lds.getRefCounter(dispatchId, wgId);
 }
 
 bool
-ComputeUnit::isSimdDone(uint32_t simdId) const
+ComputeUnit::isVectorAluIdle(uint32_t simdId) const
 {
-    assert(simdId < numSIMDs);
-
-    for (int i=0; i < numGlbMemUnits; ++i) {
-        if (!vrfToGlobalMemPipeBus[i].rdy())
-            return false;
-    }
-    for (int i=0; i < numLocMemUnits; ++i) {
-        if (!vrfToLocalMemPipeBus[i].rdy())
-            return false;
-    }
-    if (!aluPipe[simdId].rdy()) {
-        return false;
-    }
+    assert(simdId < numVectorALUs);
 
     for (int i_wf = 0; i_wf < shader->n_wf; ++i_wf){
-        if (wfList[simdId][i_wf]->status != Wavefront::S_STOPPED) {
+        if (wfList[simdId][i_wf]->getStatus() != Wavefront::S_STOPPED) {
             return false;
         }
     }
@@ -1804,7 +2549,7 @@ ComputeUnit::sendToLds(GPUDynInstPtr gpuDynInst)
     // This is the SenderState needed upon return
     newPacket->senderState = new LDSPort::SenderState(gpuDynInst);
 
-    return ldsPort->sendTimingReq(newPacket);
+    return ldsPort.sendTimingReq(newPacket);
 }
 
 /**
@@ -1850,7 +2595,7 @@ ComputeUnit::LDSPort::sendTimingReq(PacketPtr pkt)
                         computeUnit->cu_id, gpuDynInst->simdId,
                         gpuDynInst->wfSlotId);
         return false;
-    } else if (!MasterPort::sendTimingReq(pkt)) {
+    } else if (!RequestPort::sendTimingReq(pkt)) {
         // need to stall the LDS port until a recvReqRetry() is received
         // this indicates that there is more space
         stallPort();
@@ -1894,7 +2639,7 @@ ComputeUnit::LDSPort::recvReqRetry()
 
         DPRINTF(GPUPort, "CU%d: retrying LDS send\n", computeUnit->cu_id);
 
-        if (!MasterPort::sendTimingReq(packet)) {
+        if (!RequestPort::sendTimingReq(packet)) {
             // Stall port
             stallPort();
             DPRINTF(GPUPort, ": LDS send failed again\n");

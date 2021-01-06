@@ -84,7 +84,6 @@ import os
 import re
 
 from six import add_metaclass
-from six.moves import configparser as ConfigParser
 from pickle import HIGHEST_PROTOCOL as highest_pickle_protocol
 
 from testlib.helper import absdirpath, AttrDict, FrozenAttrDict
@@ -130,11 +129,6 @@ class _Config(object):
     def _init(self, parser):
         self._parse_commandline_args(parser)
         self._run_post_processors()
-        self._initialized = True
-
-    def _init_with_dicts(self, config, defaults):
-        self._config = config
-        self._defaults = defaults
         self._initialized = True
 
     def _add_post_processor(self, attr, post_processor):
@@ -219,9 +213,12 @@ def define_defaults(defaults):
     defaults.base_dir = os.path.abspath(os.path.join(absdirpath(__file__),
                                                       os.pardir,
                                                       os.pardir))
-    defaults.result_path = os.path.join(os.getcwd(), '.testing-results')
-    defaults.list_only_failed = False
-    defaults.resource_url = 'http://dist.gem5.org/dist/v20'
+    defaults.result_path = os.path.join(os.getcwd(), 'testing-results')
+    defaults.resource_url = 'http://dist.gem5.org/dist/v20-1'
+    defaults.resource_path = os.path.abspath(os.path.join(defaults.base_dir,
+                                            'tests',
+                                            'gem5',
+                                            'resources'))
 
 def define_constants(constants):
     '''
@@ -254,7 +251,6 @@ def define_constants(constants):
 
     constants.host_isa_tag_type = 'host'
     constants.host_x86_64_tag = 'x86_64'
-    constants.host_i386_tag = 'i386'
     constants.host_arm_tag = 'aarch64'
 
     constants.supported_tags = {
@@ -278,7 +274,6 @@ def define_constants(constants):
         ),
         constants.host_isa_tag_type: (
             constants.host_x86_64_tag,
-            constants.host_i386_tag,
             constants.host_arm_tag,
         ),
     }
@@ -287,11 +282,11 @@ def define_constants(constants):
     # case where host ISA and target ISA need to coincide
     constants.target_host = {
         constants.arm_tag   : (constants.host_arm_tag,),
-        constants.x86_tag   : (constants.host_x86_64_tag, constants.host_i386_tag),
-        constants.sparc_tag : (constants.host_x86_64_tag, constants.host_i386_tag),
-        constants.riscv_tag : (constants.host_x86_64_tag, constants.host_i386_tag),
-        constants.mips_tag  : (constants.host_x86_64_tag, constants.host_i386_tag),
-        constants.power_tag : (constants.host_x86_64_tag, constants.host_i386_tag),
+        constants.x86_tag   : (constants.host_x86_64_tag,),
+        constants.sparc_tag : (constants.host_x86_64_tag,),
+        constants.riscv_tag : (constants.host_x86_64_tag,),
+        constants.mips_tag  : (constants.host_x86_64_tag,),
+        constants.power_tag : (constants.host_x86_64_tag,),
         constants.null_tag  : (None,)
     }
 
@@ -578,8 +573,8 @@ def define_common_args(config):
         Argument(
             '--bin-path',
             action='store',
-            default=None,
-            help='Path where binaries are stored (downloaded if not present)'
+            default=config._defaults.resource_path,
+            help='Path where resources are stored (downloaded if not present)'
         ),
         Argument(
             '--resource-url',

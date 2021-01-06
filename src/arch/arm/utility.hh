@@ -128,6 +128,8 @@ inPrivilegedMode(ThreadContext *tc)
     return !inUserMode(tc);
 }
 
+bool isSecure(ThreadContext *tc);
+
 bool inAArch64(ThreadContext *tc);
 
 static inline OperatingMode
@@ -149,6 +151,7 @@ currEL(CPSR cpsr)
     return opModeToEL((OperatingMode) (uint8_t)cpsr.mode);
 }
 
+bool HavePACExt(ThreadContext *tc);
 bool HaveVirtHostExt(ThreadContext *tc);
 bool HaveSecureEL2Ext(ThreadContext *tc);
 bool IsSecureEL2Enabled(ThreadContext *tc);
@@ -172,6 +175,12 @@ bool EL2Enabled(ThreadContext *tc);
 std::pair<bool, bool>
 ELUsingAArch32K(ThreadContext *tc, ExceptionLevel el);
 
+std::pair<bool, bool>
+ELStateUsingAArch32K(ThreadContext *tc, ExceptionLevel el, bool secure);
+
+bool
+ELStateUsingAArch32(ThreadContext *tc, ExceptionLevel el, bool secure);
+
 bool ELIs32(ThreadContext *tc, ExceptionLevel el);
 
 bool ELIs64(ThreadContext *tc, ExceptionLevel el);
@@ -182,7 +191,10 @@ bool ELIs64(ThreadContext *tc, ExceptionLevel el);
  */
 bool ELIsInHost(ThreadContext *tc, ExceptionLevel el);
 
+ExceptionLevel debugTargetFrom(ThreadContext *tc, bool secure);
+
 bool isBigEndian64(const ThreadContext *tc);
+
 
 /**
  * badMode is checking if the execution mode provided as an argument is
@@ -228,7 +240,7 @@ Addr purifyTaggedAddr(Addr addr, ThreadContext *tc, ExceptionLevel el,
 Addr purifyTaggedAddr(Addr addr, ThreadContext *tc, ExceptionLevel el,
                       bool isInstr);
 int computeAddrTop(ThreadContext *tc, bool selbit, bool isInstr,
-               TTBCR tcr, ExceptionLevel el);
+               TCR tcr, ExceptionLevel el);
 
 static inline bool
 inSecureState(SCR scr, CPSR cpsr)
@@ -247,7 +259,7 @@ inSecureState(SCR scr, CPSR cpsr)
     }
 }
 
-bool inSecureState(ThreadContext *tc);
+bool isSecureBelowEL3(ThreadContext *tc);
 
 bool longDescFormatInUse(ThreadContext *tc);
 
@@ -436,9 +448,10 @@ uint8_t encodePhysAddrRange64(int pa_size);
 
 inline ByteOrder byteOrder(const ThreadContext *tc)
 {
-    return isBigEndian64(tc) ? BigEndianByteOrder : LittleEndianByteOrder;
+    return isBigEndian64(tc) ? ByteOrder::big : ByteOrder::little;
 };
 
-}
+bool isUnpriviledgeAccess(ThreadContext * tc);
 
+}
 #endif

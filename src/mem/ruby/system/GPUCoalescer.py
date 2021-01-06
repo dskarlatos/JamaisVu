@@ -36,14 +36,15 @@ from m5.objects.Sequencer import *
 
 class RubyGPUCoalescer(RubyPort):
    type = 'RubyGPUCoalescer'
+   abstract = True
    cxx_class = 'GPUCoalescer'
    cxx_header = "mem/ruby/system/GPUCoalescer.hh"
 
    # max_outstanding_requests = (wave front slots) x (wave front size)
    max_outstanding_requests = Param.Int(40*64,
                                 "max requests (incl. prefetches) outstanding")
-   assume_rfo = Param.Bool(True, "assume protocol implementes Read for "
-                           "Ownership coherence");
+   max_coalesces_per_cycle = Param.Int(1, "max instructions that can be " \
+                                "coalesced in a single cycle")
 
    icache = Param.RubyCache("")
    dcache = Param.RubyCache("")
@@ -51,3 +52,5 @@ class RubyGPUCoalescer(RubyPort):
        "max outstanding cycles for a request before " \
        "deadlock/livelock declared")
    garnet_standalone = Param.Bool(False, "")
+
+   gmTokenPort = ResponsePort("Port to the CU for sharing tokens")

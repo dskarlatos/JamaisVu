@@ -40,7 +40,7 @@ if buildEnv['FULL_SYSTEM']:
     class X86PagetableWalker(SimObject):
         type = 'X86PagetableWalker'
         cxx_class = 'X86ISA::Walker'
-        port = SlavePort("Port for the hardware table walker")
+        port = ResponsePort("Port for the hardware table walker")
         system = Param.System(Parent.any, "system object")
 
 class X86GPUTLB(ClockedObject):
@@ -58,8 +58,12 @@ class X86GPUTLB(ClockedObject):
     missLatency1 = Param.Int(5, "Latency #1 of a TLB miss")
     missLatency2 = Param.Int(100, "Latency #2 of a TLB miss")
     maxOutstandingReqs = Param.Int(64, "# of maximum outstanding requests")
-    slave = VectorSlavePort("Port on side closer to CPU/CU")
-    master = VectorMasterPort("Port on side closer to memory")
+    cpu_side_ports = VectorResponsePort("Ports on side closer to CPU/CU")
+    slave    = DeprecatedParam(cpu_side_ports,
+                        '`slave` is now called `cpu_side_ports`')
+    mem_side_ports = VectorRequestPort("Ports on side closer to memory")
+    master   = DeprecatedParam(mem_side_ports,
+                        '`master` is now called `mem_side_ports`')
     allocationPolicy = Param.Bool(True, "Allocate on an access")
     accessDistance = Param.Bool(False, "print accessDistance stats")
 
@@ -69,6 +73,10 @@ class TLBCoalescer(ClockedObject):
     cxx_header = 'gpu-compute/tlb_coalescer.hh'
     probesPerCycle = Param.Int(2, "Number of TLB probes per cycle")
     coalescingWindow = Param.Int(1, "Permit coalescing across that many ticks")
-    slave = VectorSlavePort("Port on side closer to CPU/CU")
-    master = VectorMasterPort("Port on side closer to memory")
+    cpu_side_ports = VectorResponsePort("Port on side closer to CPU/CU")
+    slave    = DeprecatedParam(cpu_side_ports,
+                        '`slave` is now called `cpu_side_ports`')
+    mem_side_ports = VectorRequestPort("Port on side closer to memory")
+    master   = DeprecatedParam(mem_side_ports,
+                        '`master` is now called `mem_side_ports`')
     disableCoalescing = Param.Bool(False,"Dispable Coalescing")

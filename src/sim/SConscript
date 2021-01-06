@@ -51,6 +51,7 @@ Source('cxx_config_ini.cc')
 Source('debug.cc')
 Source('py_interact.cc', add_tags='python')
 Source('eventq.cc')
+Source('futex_map.cc')
 Source('global_event.cc')
 Source('init.cc', add_tags='python')
 Source('init_signals.cc')
@@ -82,6 +83,7 @@ Source('power_domain.cc')
 
 GTest('byteswap.test', 'byteswap.test.cc', '../base/types.cc')
 GTest('guest_abi.test', 'guest_abi.test.cc')
+GTest('proxy_ptr.test', 'proxy_ptr.test.cc')
 
 if env['TARGET_ISA'] != 'null':
     SimObject('InstTracer.py')
@@ -95,9 +97,6 @@ if env['TARGET_ISA'] != 'null':
     Source('syscall_emul.cc')
     Source('syscall_desc.cc')
     Source('vma.cc')
-
-if env['TARGET_ISA'] != 'x86':
-    Source('microcode_rom.cc')
 
 DebugFlag('Checkpoint')
 DebugFlag('Config')

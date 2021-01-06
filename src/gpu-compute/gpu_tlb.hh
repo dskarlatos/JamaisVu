@@ -69,26 +69,7 @@ namespace X86ISA
 
         uint32_t configAddress;
 
-        // TLB clock: will inherit clock from shader's clock period in terms
-        // of nuber of ticks of curTime (aka global simulation clock)
-        // The assignment of TLB clock from shader clock is done in the python
-        // config files.
-        int clock;
-
       public:
-        // clock related functions ; maps to-and-from Simulation ticks and
-        // object clocks.
-        Tick frequency() const { return SimClock::Frequency / clock; }
-
-        Tick
-        ticks(int numCycles) const
-        {
-            return (Tick)clock * numCycles;
-        }
-
-        Tick curCycle() const { return curTick() / clock; }
-        Tick tickToCycles(Tick val) const { return val / clock;}
-
         typedef X86GPUTLBParams Params;
         GpuTLB(const Params *p);
         ~GpuTLB();
@@ -255,12 +236,12 @@ namespace X86ISA
         void issueTLBLookup(PacketPtr pkt);
 
         // CpuSidePort is the TLB Port closer to the CPU/CU side
-        class CpuSidePort : public SlavePort
+        class CpuSidePort : public ResponsePort
         {
           public:
             CpuSidePort(const std::string &_name, GpuTLB * gpu_TLB,
                         PortID _index)
-                : SlavePort(_name, gpu_TLB), tlb(gpu_TLB), index(_index) { }
+                : ResponsePort(_name, gpu_TLB), tlb(gpu_TLB), index(_index) { }
 
           protected:
             GpuTLB *tlb;
@@ -282,12 +263,12 @@ namespace X86ISA
          * Future action item: if we ever do real page walks, then this port
          * should be connected to a RubyPort.
          */
-        class MemSidePort : public MasterPort
+        class MemSidePort : public RequestPort
         {
           public:
             MemSidePort(const std::string &_name, GpuTLB * gpu_TLB,
                         PortID _index)
-                : MasterPort(_name, gpu_TLB), tlb(gpu_TLB), index(_index) { }
+                : RequestPort(_name, gpu_TLB), tlb(gpu_TLB), index(_index) { }
 
             std::deque<PacketPtr> retries;
 
@@ -344,7 +325,7 @@ namespace X86ISA
             // When was the req for this translation issued
             uint64_t issueTime;
             // Remember where this came from
-            std::vector<SlavePort*>ports;
+            std::vector<ResponsePort*>ports;
 
             // keep track of #uncoalesced reqs per packet per TLB level;
             // reqCnt per level >= reqCnt higher level

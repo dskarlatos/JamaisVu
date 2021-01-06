@@ -89,7 +89,7 @@ class CheckerCPU : public BaseCPU, public ExecContext
     using VecRegContainer = TheISA::VecRegContainer;
 
     /** id attached to all issued requests */
-    MasterID masterId;
+    RequestorID requestorId;
   public:
     void init() override;
 
@@ -99,9 +99,9 @@ class CheckerCPU : public BaseCPU, public ExecContext
 
     void setSystem(System *system);
 
-    void setIcachePort(MasterPort *icache_port);
+    void setIcachePort(RequestPort *icache_port);
 
-    void setDcachePort(MasterPort *dcache_port);
+    void setDcachePort(RequestPort *dcache_port);
 
     Port &
     getDataPort() override
@@ -127,8 +127,8 @@ class CheckerCPU : public BaseCPU, public ExecContext
 
     System *systemPtr;
 
-    MasterPort *icachePort;
-    MasterPort *dcachePort;
+    RequestPort *icachePort;
+    RequestPort *dcachePort;
 
     ThreadContext *tc;
 
@@ -434,6 +434,41 @@ class CheckerCPU : public BaseCPU, public ExecContext
         thread->setMemAccPredicate(val);
     }
 
+    uint64_t
+    getHtmTransactionUid() const override
+    {
+        panic("not yet supported!");
+        return 0;
+    };
+
+    uint64_t
+    newHtmTransactionUid() const override
+    {
+        panic("not yet supported!");
+        return 0;
+    };
+
+    Fault
+    initiateHtmCmd(Request::Flags flags) override
+    {
+        panic("not yet supported!");
+        return NoFault;
+    }
+
+    bool
+    inHtmTransactionalState() const override
+    {
+        panic("not yet supported!");
+        return false;
+    }
+
+    uint64_t
+    getHtmTransactionalDepth() const override
+    {
+        panic("not yet supported!");
+        return 0;
+    }
+
     TheISA::PCState pcState() const override { return thread->pcState(); }
     void
     pcState(const TheISA::PCState &val) override
@@ -577,7 +612,7 @@ class CheckerCPU : public BaseCPU, public ExecContext
     void wakeup(ThreadID tid) override { }
     // Assume that the normal CPU's call to syscall was successful.
     // The checker's state would have already been updated by the syscall.
-    void syscall(Fault *fault) override { }
+    void syscall() override { }
 
     void
     handleError()

@@ -126,9 +126,6 @@ class DefaultDecode
     /** Returns the name of decode. */
     std::string name() const;
 
-    /** Registers statistics. */
-    void regStats();
-
     /** Sets the main backwards communication time buffer pointer. */
     void setTimeBuffer(TimeBuffer<TimeStruct> *tb_ptr);
 
@@ -314,35 +311,39 @@ class DefaultDecode
      */
     bool squashAfterDelaySlot[Impl::MaxThreads];
 
-
-    /** Stat for total number of idle cycles. */
-    Stats::Scalar decodeIdleCycles;
-    /** Stat for total number of blocked cycles. */
-    Stats::Scalar decodeBlockedCycles;
-    /** Stat for total number of normal running cycles. */
-    Stats::Scalar decodeRunCycles;
-    /** Stat for total number of unblocking cycles. */
-    Stats::Scalar decodeUnblockCycles;
-    /** Stat for total number of squashing cycles. */
-    Stats::Scalar decodeSquashCycles;
-    /** Stat for number of times a branch is resolved at decode. */
-    Stats::Scalar decodeBranchResolved;
-    /** Stat for number of times a branch mispredict is detected. */
-    Stats::Scalar decodeBranchMispred;
-    /** Stat for number of times decode detected a non-control instruction
-     * incorrectly predicted as a branch.
-     */
-    Stats::Scalar decodeControlMispred;
-    /** Stat for total number of decoded instructions. */
-    Stats::Scalar decodeDecodedInsts;
-    /** Stat for total number of squashed instructions. */
-    Stats::Scalar decodeSquashedInsts;
-
-    // stats for MRA
-    Stats::Scalar decodeSquashSet;
-
-    Stats::Distribution epochInterval;
     uint64_t _epochIntervalCnt[Impl::MaxThreads];
+
+    struct DecodeStats : public Stats::Group {
+        DecodeStats(O3CPU *cpu);
+
+        /** Stat for total number of idle cycles. */
+        Stats::Scalar idleCycles;
+        /** Stat for total number of blocked cycles. */
+        Stats::Scalar blockedCycles;
+        /** Stat for total number of normal running cycles. */
+        Stats::Scalar runCycles;
+        /** Stat for total number of unblocking cycles. */
+        Stats::Scalar unblockCycles;
+        /** Stat for total number of squashing cycles. */
+        Stats::Scalar squashCycles;
+        /** Stat for number of times a branch is resolved at decode. */
+        Stats::Scalar branchResolved;
+        /** Stat for number of times a branch mispredict is detected. */
+        Stats::Scalar branchMispred;
+        /** Stat for number of times decode detected a non-control instruction
+         * incorrectly predicted as a branch.
+         */
+        Stats::Scalar controlMispred;
+        /** Stat for total number of decoded instructions. */
+        Stats::Scalar decodedInsts;
+        /** Stat for total number of squashed instructions. */
+        Stats::Scalar squashedInsts;
+
+        // stats for MRA
+        Stats::Scalar decodeSquashSet;
+
+        Stats::Distribution epochInterval;
+    } stats;
 };
 
 #endif // __CPU_O3_DECODE_HH__

@@ -394,6 +394,42 @@ MessageBuffer::stallMessage(Addr addr, Tick current_time)
     m_stall_count++;
 }
 
+bool
+MessageBuffer::hasStalledMsg(Addr addr) const
+{
+    return (m_stall_msg_map.count(addr) != 0);
+}
+
+void
+MessageBuffer::deferEnqueueingMessage(Addr addr, MsgPtr message)
+{
+    DPRINTF(RubyQueue, "Deferring enqueueing message: %s, Address %#x\n",
+            *(message.get()), addr);
+    (m_deferred_msg_map[addr]).push_back(message);
+}
+
+void
+MessageBuffer::enqueueDeferredMessages(Addr addr, Tick curTime, Tick delay)
+{
+    assert(!isDeferredMsgMapEmpty(addr));
+    std::vector<MsgPtr>& msg_vec = m_deferred_msg_map[addr];
+    assert(msg_vec.size() > 0);
+
+    // enqueue all deferred messages associated with this address
+    for (MsgPtr m : msg_vec) {
+        enqueue(m, curTime, delay);
+    }
+
+    msg_vec.clear();
+    m_deferred_msg_map.erase(addr);
+}
+
+bool
+MessageBuffer::isDeferredMsgMapEmpty(Addr addr) const
+{
+    return m_deferred_msg_map.count(addr) == 0;
+}
+
 void
 MessageBuffer::print(ostream& out) const
 {

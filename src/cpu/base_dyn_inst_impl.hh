@@ -90,6 +90,9 @@ void BaseDynInst<Impl>::initVars() {
     physEffAddr = 0;
     readyRegs = 0;
     memReqFlags = 0;
+    // hardware transactional memory
+    htmUid = -1;
+    htmDepth = 0;
 
     status.reset();
 

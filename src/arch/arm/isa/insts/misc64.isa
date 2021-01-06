@@ -1,6 +1,6 @@
 // -*- mode:c++ -*-
 
-// Copyright (c) 2011-2013, 2016-2018 ARM Limited
+// Copyright (c) 2011-2013, 2016-2018, 2020 ARM Limited
 // All rights reserved
 //
 // The license below extends only to copyright in the software and shall
@@ -37,6 +37,12 @@
 
 let {{
     svcCode = '''
+    if (xc->inHtmTransactionalState()) {
+        fault = std::make_shared<GenericHtmFailureFault>(
+            xc->getHtmTransactionUid(),
+            HtmFailureFaultCause::EXCEPTION);
+        return fault;
+    }
     fault = std::make_shared<SupervisorCall>(machInst, bits(machInst, 20, 5));
     '''
 
@@ -48,6 +54,12 @@ let {{
     exec_output = BasicExecute.subst(svcIop)
 
     hvcCode = '''
+    if (xc->inHtmTransactionalState()) {
+        fault = std::make_shared<GenericHtmFailureFault>(
+            xc->getHtmTransactionUid(),
+            HtmFailureFaultCause::EXCEPTION);
+        return fault;
+    }
     SCR scr = Scr64;
     HCR hcr = Hcr64;
     CPSR cpsr = Cpsr;
@@ -56,7 +68,8 @@ let {{
     ExceptionLevel pstate_EL = (ExceptionLevel)(uint8_t)(cpsr.el);
 
     bool unalloc_encod = !ArmSystem::haveEL(tc, EL2) || pstate_EL == EL0 ||
-                         (pstate_EL == EL1 && inSecureState(tc));
+                         (pstate_EL == EL1 && (!IsSecureEL2Enabled(tc) &&
+                         isSecure(tc)));
 
     bool hvc_enable = ArmSystem::haveEL(tc, EL3) ?
         scr.hce : !hcr.hcd;
@@ -77,6 +90,12 @@ let {{
 
     # @todo: extend to take into account Virtualization.
     smcCode = '''
+    if (xc->inHtmTransactionalState()) {
+        fault = std::make_shared<GenericHtmFailureFault>(
+            xc->getHtmTransactionUid(),
+            HtmFailureFaultCause::EXCEPTION);
+        return fault;
+    }
     SCR scr = Scr64;
     CPSR cpsr = Cpsr;
 
@@ -185,8 +204,11 @@ let {{
 
     hltCode = '''
     ThreadContext *tc = xc->tcBase();
-    if (ArmSystem::haveSemihosting(tc) && imm == 0xF000) {
+    bool have_semi = ArmSystem::haveSemihosting(tc);
+    if (imm == ArmSemihosting::A64Imm && have_semi) {
         ArmSystem::callSemihosting64(tc);
+    } else if (imm == ArmSemihosting::Gem5Imm && have_semi) {
+        ArmSystem::callSemihosting64(tc, true);
     } else {
         // HLT instructions aren't implemented, so treat them as undefined
         // instructions.
