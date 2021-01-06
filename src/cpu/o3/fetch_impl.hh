@@ -47,6 +47,8 @@
 #include <list>
 #include <map>
 #include <queue>
+#include <sstream>
+#include <cstdlib>
 
 #include "arch/generic/tlb.hh"
 #include "arch/utility.hh"
@@ -155,6 +157,8 @@ DefaultFetch<Impl>::DefaultFetch(O3CPU *_cpu, DerivO3CPUParams *params)
         fetchBufferValid[i] = false;
         lastIcacheStall[i] = 0;
         issuePipelinedIfetch[i] = false;
+        epochStatus[i] = 0;
+        _epochIntervalCnt[i] = 0;
     }
 
     branchPred = params->branchPred;
@@ -165,6 +169,62 @@ DefaultFetch<Impl>::DefaultFetch(O3CPU *_cpu, DerivO3CPUParams *params)
         // Create space to buffer the cache line data,
         // which may not hold the entire cache line.
         fetchBuffer[tid] = new uint8_t[fetchBufferSize];
+    }
+
+    if (GCONFIG.replayDet == utils::EPOCH) {
+        bool r = readEpochInfo();
+        if (!r) panic("Failed to open epoch file");
+    }
+}
+
+template <class Impl>
+bool DefaultFetch<Impl>::readEpochInfo() {
+    ifstream infile(GCONFIG.epochInfoPath);
+    if (infile.is_open()) {
+        cerr << ZINFO
+             << "Opened epoch file at: \""
+             << GCONFIG.epochInfoPath
+             << "\" :)"
+             << endl;
+
+        string oneline;
+        while (getline(infile, oneline)) {
+            Addr pc;
+            char eMarker;
+            utils::EpochScale eScale;
+            istringstream iss(oneline);
+            iss >> hex >> pc >> eMarker;
+            switch (eMarker) {
+                case 'I':
+                    eScale = utils::ITERATION;
+                    break;
+                case 'L':
+                    eScale = utils::LOOP;
+                    break;
+                case 'R':
+                    eScale = utils::ROUTINE;
+                    break;
+                default:
+                    eScale = utils::INVALID;
+                    break;
+            }
+
+            if (!IN_MAP(pc, epochInfo)) {
+                epochInfo[pc] = eScale;
+            }
+            else {
+                epochInfo[pc] = std::max(epochInfo[pc], eScale);
+            }
+        }
+        return true;
+    }
+    else {
+        cerr << ZERROR
+             << "Cannot open epoch file at: \""
+             << GCONFIG.epochInfoPath
+             << "\" :("
+             << endl;
+        return false;
     }
 }
 
@@ -227,7 +287,8 @@ FetchStatGroup::FetchStatGroup(O3CPU *cpu, DefaultFetch *fetch)
     ADD_STAT(fetchMemFences, "Number of fences added on memRefs at Fetch"),
     ADD_STAT(fetchAllFences, "Number of fences added on all instructions at Fetch"),
     ADD_STAT(fetchCCHits, "Number of Counter Cache Hits at Fetch"),
-    ADD_STAT(fetchCCMisses, "Number of Counter Cache misses at Fetch")
+    ADD_STAT(fetchCCMisses, "Number of Counter Cache misses at Fetch"),
+    ADD_STAT(epochInterval, "Epoch interval")
 {
         icacheStallCycles
             .prereq(icacheStallCycles);
@@ -276,6 +337,9 @@ FetchStatGroup::FetchStatGroup(O3CPU *cpu, DefaultFetch *fetch)
             .flags(Stats::total);
         rate
             .flags(Stats::total);
+        epochInterval
+            .init(0, 300, 50)
+            .flags(Stats::pdf);
 }
 template<class Impl>
 void
@@ -1066,6 +1130,35 @@ DefaultFetch<Impl>::buildInst(ThreadID tid, StaticInstPtr staticInst,
         MRAPRINT(FetchCreate, instruction, staticInst);
     }
 
+    if (GCONFIG.replayDet == utils::EPOCH) {
+        if (instruction->isFirstMicroop()) {
+            utils::EpochScale eScale;
+            if (IN_MAP(instruction->instAddr(), epochInfo)) {
+                eScale = epochInfo.at(instruction->instAddr());
+            }
+            else if (instruction->isCallInst()) {
+                eScale = utils::ROUTINE;
+            }
+            else {
+                eScale = utils::INVALID;
+            }
+
+            if (eScale >= GCONFIG.epochSize) {
+                // a new epoch
+               fetchStats.epochInterval.sample(_epochIntervalCnt[tid]);
+                _epochIntervalCnt[tid] = 0;
+
+                epochStatus[tid] += 1;
+                instruction->setEpochSeparator();
+                instruction->eScale = eScale;
+                CSPRINT(NewEpoch, instruction, "epochID: %lli\n", epochStatus[tid]);
+            }
+            _epochIntervalCnt[tid] += 1; // incretment every instruction (not uop)
+        }
+
+        instruction->setEpochID(epochStatus[tid]);
+    }
+
     // check MRA defenses are enabled
     if ((GCONFIG.isSpectre || GCONFIG.isFuturistic) && GCONFIG.replayDet != utils::NO_DETECT) {
         bool requireFence = false;
@@ -1709,6 +1802,15 @@ void DefaultFetch<Impl>::counterCacheSetup(std::string name, utils::CounterCache
         cerr << name
              << " is disabled"
              << endl;
+    }
+}
+
+template <class Impl>
+void DefaultFetch<Impl>::resetEpoch(ThreadID tid, DynInstPtr inst) {
+    auto epochID = inst->isEpochSeparator() ? inst->epochID - 1 : inst->epochID;
+    if (epochID < epochStatus[tid]) {
+        epochStatus[tid] = epochID;
+        CSPRINT(ResetEpoch, inst, "epochID: %lli\n", epochStatus[tid]);
     }
 }
 

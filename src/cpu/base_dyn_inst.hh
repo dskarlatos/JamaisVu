@@ -188,7 +188,7 @@ public:
     char typeCode;
     bool is_violator = false;
     InstSeqNum violator_seqNum;
-    InstSeqNum epochID;
+    InstSeqNum epochID = 0;
     utils::EpochScale eScale; // epoch scale
 
 protected:

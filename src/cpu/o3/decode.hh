@@ -105,11 +105,6 @@ class DefaultDecode
     /** Per-thread status. */
     ThreadStatus decodeStatus[Impl::MaxThreads];
 
-    InstSeqNum epochStatus[Impl::MaxThreads];
-    std::unordered_map<Addr, utils::EpochScale> epochInfo;
-
-    bool readEpochInfo();
-
   public:
     /** DefaultDecode constructor. */
     DefaultDecode(O3CPU *_cpu, DerivO3CPUParams *params);
@@ -165,8 +160,6 @@ class DefaultDecode
      * correct.
      */
     void decodeInsts(ThreadID tid);
-
-    void resetEpoch(ThreadID tid, DynInstPtr inst);
 
   private:
     /** Inserts a thread's instructions into the skid buffer, to be decoded

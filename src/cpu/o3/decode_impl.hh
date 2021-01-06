@@ -86,67 +86,9 @@ DefaultDecode<Impl>::DefaultDecode(O3CPU *_cpu, DerivO3CPUParams *params)
     for (int tid = 0; tid < Impl::MaxThreads; tid++) {
         stalls[tid] = {false};
         decodeStatus[tid] = Idle;
-        epochStatus[tid] = 0;
-        _epochIntervalCnt[tid] = 0;
         bdelayDoneSeqNum[tid] = 0;
         squashInst[tid] = nullptr;
         squashAfterDelaySlot[tid] = 0;
-    }
-
-    if (GCONFIG.replayDet == utils::EPOCH) {
-        bool r = readEpochInfo();
-        if (!r) panic("Failed to open epoch file");
-    }
-}
-
-template <class Impl>
-bool DefaultDecode<Impl>::readEpochInfo() {
-    ifstream infile(GCONFIG.epochInfoPath);
-    if (infile.is_open()) {
-        cerr << ZINFO
-             << "Opened epoch file at: \""
-             << GCONFIG.epochInfoPath
-             << "\" :)"
-             << endl;
-
-        string oneline;
-        while (getline(infile, oneline)) {
-            Addr pc;
-            char eMarker;
-            utils::EpochScale eScale;
-            istringstream iss(oneline);
-            iss >> hex >> pc >> eMarker;
-            switch (eMarker) {
-                case 'I':
-                    eScale = utils::ITERATION;
-                    break;
-                case 'L':
-                    eScale = utils::LOOP;
-                    break;
-                case 'R':
-                    eScale = utils::ROUTINE;
-                    break;
-                default:
-                    eScale = utils::INVALID;
-                    break;
-            }
-
-            if (!IN_MAP(pc, epochInfo)) {
-                epochInfo[pc] = eScale;
-            }
-            else {
-                epochInfo[pc] = std::max(epochInfo[pc], eScale);
-            }
-        }
-        return true;
-    }
-    else {
-        cerr << ZERROR
-             << "Cannot open epoch file at: \""
-             << GCONFIG.epochInfoPath
-             << "\" :("
-             << endl;
-        return false;
     }
 }
 
@@ -749,35 +691,6 @@ void DefaultDecode<Impl>::decodeInsts(ThreadID tid) {
 
         DSTATE(Decode, inst);
 
-        if (GCONFIG.replayDet == utils::EPOCH) {
-            if (inst->isFirstMicroop()) {
-                utils::EpochScale eScale;
-                if (IN_MAP(inst->instAddr(), epochInfo)) {
-                    eScale = epochInfo.at(inst->instAddr());
-                }
-                else if (inst->isCallInst()) {
-                    eScale = utils::ROUTINE;
-                }
-                else {
-                    eScale = utils::INVALID;
-                }
-
-                if (eScale >= GCONFIG.epochSize) {
-                    // a new epoch
-                    stats.epochInterval.sample(_epochIntervalCnt[tid]);
-                    _epochIntervalCnt[tid] = 0;
-
-                    epochStatus[tid] += 1;
-                    inst->setEpochSeparator();
-                    inst->eScale = eScale;
-                    CSPRINT(NewEpoch, inst, "epochID: %lli\n", epochStatus[tid]);
-                }
-                _epochIntervalCnt[tid] += 1; // incretment every instruction (not uop)
-            }
-
-            inst->setEpochID(epochStatus[tid]);
-        }
-
         // under a shadow means there are older unresolved branches (Spectre)
         // or unretired loads, divisions or unresolved stores (Futuristic).
         if (rob->isUnderShadow(tid) && (GCONFIG.isSpectre || GCONFIG.isFuturistic)) {
@@ -842,15 +755,6 @@ void DefaultDecode<Impl>::decodeInsts(ThreadID tid) {
     // tracking.
     if (toRenameIndex) {
         wroteToTimeBuffer = true;
-    }
-}
-
-template <class Impl>
-void DefaultDecode<Impl>::resetEpoch(ThreadID tid, DynInstPtr inst) {
-    auto epochID = inst->isEpochSeparator() ? inst->epochID - 1 : inst->epochID;
-    if (epochID < epochStatus[tid]) {
-        epochStatus[tid] = epochID;
-        CSPRINT(ResetEpoch, inst, "epochID: %lli\n", epochStatus[tid]);
     }
 }
 

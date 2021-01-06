@@ -41,6 +41,9 @@
 #ifndef __CPU_O3_FETCH_HH__
 #define __CPU_O3_FETCH_HH__
 
+#include <fstream>
+#include <unordered_map>
+#include <deque>
 #include "arch/decoder.hh"
 #include "arch/utility.hh"
 #include "base/statistics.hh"
@@ -55,6 +58,7 @@
 #include "sim/eventq.hh"
 #include "sim/probe/probe.hh"
 #include "cpu/global_utils.hh"
+#include "cpu/colors.hh"
 
 struct DerivO3CPUParams;
 template <class Impl>
@@ -218,6 +222,11 @@ class DefaultFetch
 
     utils::CounterMap_p CCMap;
 
+    InstSeqNum epochStatus[Impl::MaxThreads];
+    std::unordered_map<Addr, utils::EpochScale> epochInfo;
+
+    bool readEpochInfo();
+
   public:
     /** DefaultFetch constructor. */
     DefaultFetch(O3CPU *_cpu, DerivO3CPUParams *params);
@@ -284,6 +293,9 @@ class DefaultFetch
 
     /** For priority-based fetch policies, need to keep update priorityList */
     void deactivateThread(ThreadID tid);
+
+    void resetEpoch(ThreadID tid, DynInstPtr inst);
+
   private:
     /** Reset this pipeline stage */
     void resetStage();
@@ -618,7 +630,11 @@ class DefaultFetch
         Stats::Scalar fetchAllFences;
         Stats::Scalar fetchCCHits;
         Stats::Scalar fetchCCMisses;
+        
+        Stats::Distribution epochInterval;
     } fetchStats;
+    
+    uint64_t _epochIntervalCnt[Impl::MaxThreads];
 };
 
 #endif //__CPU_O3_FETCH_HH__

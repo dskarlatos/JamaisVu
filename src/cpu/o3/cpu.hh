@@ -499,7 +499,7 @@ class FullO3CPU : public BaseO3CPU {
     }
 
     void resetEpoch(ThreadID tid, DynInstPtr inst) {
-        decode.resetEpoch(tid, inst);
+        fetch.resetEpoch(tid, inst);
     }
 
     /** Initiates a squash of all in-flight instructions for a given
