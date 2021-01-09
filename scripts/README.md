@@ -1,20 +1,20 @@
 ## Overview
-This directory comprises scripts for running Jamais Vu.
+This directory includes the scripts for running Jamais Vu.
 
 Before using these scripts, you need to set environment variables
 ```GEM5_ROOT=<path to gem5 root>``` and ```WORKLOADS_ROOT=<path to SPEC2017 root>```.
-Note that, the workload directory must structure in a certain way to use our
-scripts. Please refer to this [Section](#Assumptions-on-Workload-Directory)
+Note that the workload directory must be structured appropriately before using any of the scripts.
+Please refer to this [Section](#Structure-of-Workload-Directory)
 for more information.
 
 ## Methodology
-We use [SimPoint](http://cseweb.ucsd.edu/~calder/simpoint/) methodology
+We use the [SimPoint](http://cseweb.ucsd.edu/~calder/simpoint/) methodology
 to generate up to 10 representative intervals that accurately characterize
 end-to-end performance. Each interval has a gem5 checkpoint that allows
 Jamais Vu to resume from.
 
-## Assumptions on Workload Directory
-All our scripts assume the SPEC2017 directory has the following structure:
+## Structure of Workload Directory
+The SPEC2017 directory has the following structure:
 ```
 SPEC2017
 ├── ckpt  # SimPoint checkpoints
@@ -75,15 +75,15 @@ ARGS=--elem-cnt 128 # optional arguments for the script
 Note that, leaving any whitespace between `=` and the `<value>` may lead to unexpected behaviors.
 Also, the study name is implicitly assigned as the name of the directory that contains the configuration.
 
-After jobs are submitted, you can use script `status` to check job status for each
+After jobs are submitted, the script `status` provides check job status for each
 study and configuration.
 
 ## Reproducibility
-To reproduce our results, we created 5 study directories: `perf`, `elemCnt`,
+To reproduce the results, we created 5 study directories: `perf`, `elemCnt`,
 `activeRecord`, `CBFBits`, and `CCGeometry` under `$GEM5_ROOT/scripts`.
 Each study corresponds to a figure in the evaluation section of the paper.
 
-The description of each study is as the following:
+The description of each study is the following:
 1. `perf`: corresponds to Figure 7 in the paper. It simulates all three schemes
 plus unsafe baseline and measures normalized execution time;
 2. `elemCnt`: corresponds to Figure 8 in the paper. It performs a sensitivity
@@ -99,14 +99,14 @@ counting bloom filter entry for Epoch-Iter-Rem and Epoch-Loop-Rem;
 It performs a sensitivity study on the counter cache geometry for Counter scheme.
 
 ### Benchmark Suite
-We used SPEC2017 rate benchmark suite.
-Due to simulation issue with gem5, we have to exclude 
+We used the SPEC2017rate benchmark suite.
+Due to simulation issue with gem5, we exclude 
 2 applications (cactuBSSN and imagick) out of 23 from SPEC2017.
-We use [SimPoint](http://cseweb.ucsd.edu/~calder/simpoint/)
+We use the [SimPoint](http://cseweb.ucsd.edu/~calder/simpoint/)
 methodology to generate up to 10 representative intervals
 that accurately characterize end-to-end performance for each application.
 We have 155 intervals in total.
-Due to copyright issues, we won't be able to share our binaries and checkpoints.
+Due to copyright issues, we are not be able to share our binaries and checkpoints.
 If you want to use your own binaries and checkpoints, please organize SPEC2017
 directory according to this [Section](#Assumptions-on-Workload-Directory).
 
@@ -125,13 +125,13 @@ It will take about 20 minutes to finish job submission.
 
 ### Be Patient
 There will be ~5700 jobs in total. On average, a job takes ~20 minutes to finish.
-So, you can estimate the total execution time based on the number of condor slots on your machine.
-On our machine, which has 80 slots, it takes about 1 day to finish all the jobs.
+So, you can estimate the total execution time based on the number of condor slots on your cluster.
+On our environment, which has 80 slots, it takes about 1 day to finish the total number of jobs.
 You can use script `status` to print detailed jobs status information.
 
 ### Collect Results
-After all jobs are finished, you can collect experiment results using
-scripts named `collect` under each study directory (please make sure the required
+After the jobs are finished, you can collect the results using
+the scripts named `collect` under each study directory (please make sure that the required
 [Python libraries](requirements.txt) are installed). The script will read stats, print stats in CSV
 format, and create a plot named `<study name>.pdf`.
 The following command will collect results for every study
