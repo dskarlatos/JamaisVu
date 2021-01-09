@@ -103,9 +103,6 @@ def savefig(data: Dict[str, Dict[str, float]], normalized: List[str], prefix: st
     results, headers = organize(data, normalized)
     plot(ax1, results, headers, MAXY=2.05, INTERVAL=.2)
 
-    norm_exec = results['parest'][2]
-    ax1.text(64, 2.1, f'{norm_exec:.2f}', rotation=45, fontsize=8)
-
     fig.text(0.02, 0.5, 'Normalized Execution Time', va='center', rotation='vertical', fontsize=9)
     fig = plt.gcf()
     fig.tight_layout()

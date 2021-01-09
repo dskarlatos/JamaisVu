@@ -68,7 +68,7 @@ def savefig(data: Dict[str, Dict[str, float]], normalized: List[str],
     MIN_Y1 = 1
     MAX_Y1 = 1.41
     MIN_Y2 = 0.0
-    MAX_Y2 = 0.041
+    MAX_Y2 = 0.051
 
     schemes = sorted({n.split('@')[0] for n in normalized})
     configs = sorted({int(n.split('@')[2]) for n in normalized})

@@ -198,6 +198,14 @@ cd $RUN_DIR
 echo Simulation started at $(date)
 echo ""
 
+if [ $(hostname) != "iacoma-perf" ]; then
+    module () {
+        eval $($LMOD_CMD bash "$@") && eval $(${LMOD_SETTARG_CMD:-:} -s sh)
+    }
+    export LD_LIBRARY_PATH=$HOME/bin
+    module load gcc/7.2.0
+fi
+
 $EXEC --outdir=$OUTPUT_DIR \
 $GEM5_ROOT/configs/example/se.py --benchmark=$BENCHMARK \
 --bench-stdout=$BENCH_STDOUT --bench-stderr=$BENCH_STDERR \

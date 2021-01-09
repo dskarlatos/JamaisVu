@@ -68,7 +68,7 @@ def savefig(data: Dict[str, Dict[str, float]], normalized: List[str],
     MIN_Y1 = 1
     MAX_Y1 = 1.41
     MIN_Y2 = 0.0
-    MAX_Y2 = 0.301
+    MAX_Y2 = 0.101
 
     schemes = sorted({n.split('@')[0] for n in normalized})
     configs = sorted({int(n.split('@')[1].replace('%', '')) for n in normalized})
@@ -115,7 +115,7 @@ def savefig(data: Dict[str, Dict[str, float]], normalized: List[str],
 
     ax.set_yticks(np.arange(MIN_Y1, MAX_Y1, .1))
     ax.set_yticklabels(['{:,.1f}'.format(x) for x in ax.get_yticks()], fontsize=8)
-    ax2.set_yticks(np.arange(MIN_Y2, MAX_Y2, .05))
+    ax2.set_yticks(np.arange(MIN_Y2, MAX_Y2, .02))
     ax2.set_yticklabels(['{:,.0%}'.format(x) for x in ax2.get_yticks()], fontsize=8)
 
     ax.legend(bars, [f'{o} exec. time' for o in schemes], loc="upper left", fontsize=8, bbox_to_anchor=(-0.1, 1.60))

@@ -123,7 +123,7 @@ log=$OUTPUT/condor.log
 error=$OUTPUT/condor.err
 getenv=true
 request_cpus=1
-request_memory=2GB
+request_memory=2.5GB
 nice_user=true
 initialdir=$OUTPUT
 queue
