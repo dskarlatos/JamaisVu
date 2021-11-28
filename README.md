@@ -15,7 +15,7 @@ series = {ASPLOS ’21}
 }
 ```
 
-[You can find the Jamais Vu paper here!](http://www.cs.cmu.edu/~dskarlat/#pubs) (To appear at ASPLOS'21, coming soon)
+[You can find the Jamais Vu paper here!](http://www.cs.cmu.edu/~dskarlat/publications/jamaisvu_asplos21.pdf)
 
 
 ## Environment
